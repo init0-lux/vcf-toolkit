@@ -374,7 +374,7 @@ func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
 		fn = "Unknown"
 	}
 	b.WriteString(fmt.Sprintf("FN:%s\r\n", escapeVCF(fn)))
-	b.WriteString(fmt.Sprintf("N:%s\r\n", structuredName(c.Name)))
+	b.WriteString(fmt.Sprintf("N:%s\r\n", structuredName(c)))
 
 	if c.Organization != "" {
 		b.WriteString(fmt.Sprintf("ORG:%s\r\n", escapeVCF(c.Organization)))
@@ -436,27 +436,49 @@ func validateCountry(country string) error {
 	return nil
 }
 
-func structuredName(fullName string) string {
-	fullName = strings.TrimSpace(fullName)
+var (
+	nameSuffixes = wordSet("jr", "sr", "ii", "iii", "iv", "phd", "md", "esq")
+	companyWords = wordSet("inc", "ltd", "llc", "llp", "corp", "co", "plc", "gmbh")
+)
+
+// structuredName builds the vCard N value (family;given;additional;prefix;suffix).
+// Separate name columns win; otherwise Name is split, understanding the
+// "Family, Given" and "Given Family, Jr." forms.
+func structuredName(c model.Contact) string {
+	if c.GivenName != "" || c.MiddleName != "" || c.FamilyName != "" {
+		return nValue(c.FamilyName, c.GivenName, c.MiddleName, "")
+	}
+
+	fullName := strings.TrimSpace(c.Name)
 	if fullName == "" {
 		return ";;;;"
 	}
 
+	var suffix string
+	if before, after, ok := strings.Cut(fullName, ","); ok && !strings.Contains(after, ",") {
+		before, after = strings.TrimSpace(before), strings.TrimSpace(after)
+		word := strings.ToLower(strings.Trim(after, "."))
+		switch {
+		case before == "" || after == "":
+		case companyWords[word]:
+			return nValue("", fullName, "", "")
+		case nameSuffixes[word]:
+			fullName, suffix = before, after
+		default:
+			return nValue(before, after, "", "")
+		}
+	}
+
 	parts := strings.Fields(fullName)
 	if len(parts) == 1 {
-		return fmt.Sprintf(";%s;;;", escapeVCF(parts[0]))
+		return nValue("", parts[0], "", suffix)
 	}
+	middle := strings.Join(parts[1:len(parts)-1], " ")
+	return nValue(parts[len(parts)-1], parts[0], middle, suffix)
+}
 
-	given := escapeVCF(parts[0])
-	family := escapeVCF(parts[len(parts)-1])
-
-	var middle string
-	if len(parts) > 2 {
-		middleParts := parts[1 : len(parts)-1]
-		middle = escapeVCF(strings.Join(middleParts, " "))
-	}
-
-	return fmt.Sprintf("%s;%s;%s;;", family, given, middle)
+func nValue(family, given, middle, suffix string) string {
+	return fmt.Sprintf("%s;%s;%s;;%s", escapeVCF(family), escapeVCF(given), escapeVCF(middle), escapeVCF(suffix))
 }
 
 func escapeVCF(s string) string {

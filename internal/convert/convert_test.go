@@ -373,9 +373,8 @@ func TestContactToVCF_EscapeCharacters(t *testing.T) {
 	}
 	vcf := ContactToVCF(c)
 	assert.Contains(t, vcf, "FN:Doe\\, John & Jane")
-	// structuredName splits on spaces: first word = given, last word = family.
-	// For "Doe, John & Jane": given="Doe," (comma from original), middle="John &", family="Jane"
-	assert.Contains(t, vcf, "N:Jane;Doe\\,;John &;;")
+	// "Family, Given" form: everything after the comma is the given name.
+	assert.Contains(t, vcf, "N:Doe;John & Jane;;;")
 	assert.Contains(t, vcf, "ORG:Acme\\;Corp")
 }
 
@@ -589,11 +588,37 @@ func TestStructuredName(t *testing.T) {
 		{"John Doe", "Doe;John;;;"},
 		{"John Michael Doe", "Doe;John;Michael;;"},
 		{"  spaces  here  ", "here;spaces;;;"},
+		{"Doe, John", "Doe;John;;;"},
+		{"Doe, John Michael", "Doe;John Michael;;;"},
+		{"Doe, John & Jane", "Doe;John & Jane;;;"},
+		{"John Smith, Jr.", "Smith;John;;;Jr."},
+		{"Martin Luther King, Jr", "King;Martin;Luther;;Jr"},
+		{"Ada Lovelace, PhD", "Lovelace;Ada;;;PhD"},
+		{"Acme, Inc.", ";Acme\\, Inc.;;;"},
+		{"a, b, c", "c;a\\,;b\\,;;"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("name=%q", tt.input), func(t *testing.T) {
-			got := structuredName(tt.input)
+			got := structuredName(model.Contact{Name: tt.input})
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestStructuredName_FromParts(t *testing.T) {
+	tests := []struct {
+		name string
+		c    model.Contact
+		want string
+	}{
+		{"multi-word parts", model.Contact{Name: "Mary Ann van der Berg", GivenName: "Mary Ann", FamilyName: "van der Berg"}, "van der Berg;Mary Ann;;;"},
+		{"with middle", model.Contact{GivenName: "Jane", MiddleName: "Q", FamilyName: "Public"}, "Public;Jane;Q;;"},
+		{"given only", model.Contact{Name: "Cher", GivenName: "Cher"}, ";Cher;;;"},
+		{"escapes parts", model.Contact{GivenName: "Jo;e", FamilyName: "O,Neil"}, "O\\,Neil;Jo\\;e;;;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, structuredName(tt.c))
 		})
 	}
 }
