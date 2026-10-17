@@ -569,131 +569,29 @@ type normalizedContact struct {
 }
 
 func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM) ([]normalizedContact, error) {
-	reader := csv.NewReader(r)
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-
-	rawHeaders, err := reader.Read()
+	result, err := convert.ParseCSV(r, convert.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("reading CSV headers: %w", err)
+		return nil, err
 	}
-	headers := make([]string, len(rawHeaders))
-	for i, h := range rawHeaders {
-		headers[i] = strings.TrimSpace(h)
-	}
-	mapping := buildMapping(headers)
 
-	var contacts []normalizedContact
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			continue
-		}
-		nc := normalizeRow(record, headers, mapping, llm)
-		if nc.Name != "" || len(nc.Phones) > 0 || len(nc.Emails) > 0 || nc.Org != "" {
-			contacts = append(contacts, nc)
-		}
+	cfg := convert.NormalizeVCFConfig{
+		Email: normalize.EmailConfig{StripAliases: true},
+	}
+	if llm != nil {
+		cfg.Name = normalize.NameConfig{UseLLM: true, LLMClient: llm}
+	}
+
+	contacts := make([]normalizedContact, 0, len(result.Contacts))
+	for _, c := range result.Contacts {
+		n := convert.NormalizeContact(c, cfg)
+		contacts = append(contacts, normalizedContact{
+			Name:   n.Name,
+			Phones: n.Phones,
+			Emails: n.Emails,
+			Org:    n.Organization,
+		})
 	}
 	return contacts, nil
-}
-
-func buildMapping(headers []string) map[string]string {
-	mapping := make(map[string]string, len(headers))
-	for _, header := range headers {
-		key := fieldKey(header)
-		if key != "" {
-			mapping[header] = key
-		}
-	}
-	return mapping
-}
-
-func fieldKey(header string) string {
-	s := strings.ToLower(header)
-	s = strings.NewReplacer(" ", "_", "-", "_").Replace(s)
-	switch {
-	case matchesAny(s,
-		"name", "fullname", "full_name",
-		"contactname", "displayname",
-		"first_name", "firstname", "given_name", "givenname",
-		"last_name", "lastname", "family_name", "familyname", "surname"):
-		return "name"
-	case matchesAny(s,
-		"phone", "telephone", "tel", "mobile", "cell",
-		"phone_number", "phonenumber", "contactnumber"):
-		return "phone"
-	case matchesAny(s,
-		"email", "e_mail", "email_address", "emailaddress", "mail"):
-		return "email"
-	case matchesAny(s,
-		"org", "organization", "organisation", "company", "employer", "affiliation"):
-		return "org"
-	}
-	return ""
-}
-
-func matchesAny(s string, vals ...string) bool {
-	for _, v := range vals {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeRow(record, headers []string, mapping map[string]string, llm normalize.NameLLM) normalizedContact {
-	var nc normalizedContact
-	for i, header := range headers {
-		if i >= len(record) {
-			break
-		}
-		val := strings.TrimSpace(record[i])
-		if val == "" {
-			continue
-		}
-		field, ok := mapping[header]
-		if !ok {
-			continue
-		}
-		switch field {
-		case "name":
-			cfg := normalize.NameConfig{}
-			if llm != nil {
-				cfg.UseLLM = true
-				cfg.LLMClient = llm
-			}
-			n := normalize.NormalizeName(val, cfg)
-			if n.Normalized && n.FullName != "" {
-				nc.Name = n.FullName
-				if nc.Org == "" && n.Organization != "" {
-					nc.Org = n.Organization
-				}
-			} else if nc.Name == "" {
-				nc.Name = val
-			}
-		case "phone":
-			if p := normalize.NormalizePhone(val, normalize.PhoneConfig{}); p.Valid && p.Normalized != "" {
-				nc.Phones = append(nc.Phones, p.Normalized)
-			} else {
-				nc.Phones = append(nc.Phones, val)
-			}
-		case "email":
-			if e := normalize.NormalizeEmail(val, normalize.EmailConfig{StripAliases: true}); e.Valid && e.Normalized != "" {
-				nc.Emails = append(nc.Emails, e.Normalized)
-			} else {
-				nc.Emails = append(nc.Emails, val)
-			}
-		case "org":
-			if nc.Org == "" {
-				nc.Org = val
-			}
-		}
-	}
-	return nc
 }
 
 func toModelContacts(in []normalizedContact) []model.Contact {

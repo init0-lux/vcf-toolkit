@@ -155,9 +155,10 @@ Jane,Smith,+1-555-0101
 	result, err := ParseCSV(r, Config{})
 	require.NoError(t, err)
 	require.Len(t, result.Contacts, 2)
-	// Both first name and last name map to "name" field, so first name wins
-	assert.Equal(t, "John", result.Contacts[0].Name)
-	assert.Equal(t, "Jane", result.Contacts[1].Name)
+	assert.Equal(t, "John Doe", result.Contacts[0].Name)
+	assert.Equal(t, "John", result.Contacts[0].GivenName)
+	assert.Equal(t, "Doe", result.Contacts[0].FamilyName)
+	assert.Equal(t, "Jane Smith", result.Contacts[1].Name)
 }
 
 func TestParseCSV_UnknownHeadersIgnored(t *testing.T) {
@@ -166,10 +167,9 @@ val1,val2,val3
 val4,val5,val6
 `
 	r := strings.NewReader(input)
-	result, err := ParseCSV(r, Config{})
-	require.NoError(t, err)
-	require.Len(t, result.Contacts, 0)
-	require.Len(t, result.Errors, 2) // both rows have no recognizable fields
+	_, err := ParseCSV(r, Config{})
+	require.ErrorIs(t, err, ErrNoRecognizedColumns)
+	assert.Contains(t, err.Error(), "colA, colB, colC")
 }
 
 func TestParseCSV_SourceRowNumbers(t *testing.T) {
@@ -213,11 +213,18 @@ func TestDetectField(t *testing.T) {
 		{"full-name", FieldName},
 		{"contactname", FieldName},
 		{"displayname", FieldName},
-		{"first name", FieldName},
-		{"last name", FieldName},
-		{"givenname", FieldName},
-		{"family name", FieldName},
-		{"surname", FieldName},
+		{"Your Name", FieldName},
+		{"Name of Participant", FieldName},
+		{"Display Name", FieldName},
+		{"first name", FieldGivenName},
+		{"firstname", FieldGivenName},
+		{"givenname", FieldGivenName},
+		{"Given Name", FieldGivenName},
+		{"Middle Name", FieldMiddleName},
+		{"Additional Name", FieldMiddleName},
+		{"last name", FieldFamilyName},
+		{"family name", FieldFamilyName},
+		{"surname", FieldFamilyName},
 
 		{"phone", FieldPhone},
 		{"Phone", FieldPhone},
@@ -231,6 +238,12 @@ func TestDetectField(t *testing.T) {
 		{"mobile", FieldPhone},
 		{"cell", FieldPhone},
 		{"contactnumber", FieldPhone},
+		{"Contact Number", FieldPhone},
+		{"Mobile Phone", FieldPhone},
+		{"Business Phone", FieldPhone},
+		{"Mobile No.", FieldPhone},
+		{"WhatsApp Number", FieldPhone},
+		{"Phone 1 - Value", FieldPhone},
 
 		{"email", FieldEmail},
 		{"Email", FieldEmail},
@@ -240,6 +253,11 @@ func TestDetectField(t *testing.T) {
 		{"email_address", FieldEmail},
 		{"e-mail", FieldEmail},
 		{"mail", FieldEmail},
+		{"E-mail Address", FieldEmail},
+		{"E-mail 2 Address", FieldEmail},
+		{"E-mail 1 - Value", FieldEmail},
+		{"Primary Email", FieldEmail},
+		{"emailaddress", FieldEmail},
 
 		{"org", FieldOrg},
 		{"Org", FieldOrg},
@@ -248,11 +266,35 @@ func TestDetectField(t *testing.T) {
 		{"company", FieldOrg},
 		{"employer", FieldOrg},
 		{"affiliation", FieldOrg},
+		{"Organization Name", FieldOrg},
+		{"Organization 1 - Name", FieldOrg},
+		{"Company Name", FieldOrg},
+		{"College", FieldOrg},
 
 		{"unknown", ""},
 		{"notes", ""},
 		{"id", ""},
 		{"address", ""},
+		// Labels, types and metadata columns next to real values.
+		{"Phone 1 - Label", ""},
+		{"E-mail 1 - Type", ""},
+		{"E-mail Type", ""},
+		{"E-mail Display Name", ""},
+		{"Job Title", ""},
+		{"Organization Title", ""},
+		{"Organization 1 - Yomi Name", ""},
+		{"Phonetic First Name", ""},
+		{"Name Prefix", ""},
+		{"Name Suffix", ""},
+		{"Nickname", ""},
+		{"Business Fax", ""},
+		{"Pager", ""},
+		{"Assistant's Phone", ""},
+		{"Manager's Name", ""},
+		{"Emergency Contact Number", ""},
+		{"Team Name", ""},
+		{"Short Name", ""},
+		{"Last Modified", ""},
 	}
 
 	for _, tt := range tests {
@@ -630,14 +672,14 @@ func TestContactFromRow(t *testing.T) {
 		assert.Equal(t, "Org", c.Organization)
 	})
 
-	t.Run("first name takes precedence over last name", func(t *testing.T) {
+	t.Run("first and last name are combined", func(t *testing.T) {
 		row := []string{"John", "Doe"}
 		headers := []string{"first name", "last name"}
 		mapping := buildHeaderMapping(headers, nil)
 
 		c, errs := contactFromRow(row, headers, mapping)
 		assert.Len(t, errs, 0)
-		assert.Equal(t, "John", c.Name) // first name wins
+		assert.Equal(t, "John Doe", c.Name)
 	})
 }
 
@@ -658,8 +700,8 @@ Charlie,Brown,charlie+spam@test.co,44 20 7946 0958,Tech Ltd
 	assert.Len(t, result.ParseErrors, 0)
 
 	output := buf.String()
-	// First name used as Name
-	assert.Contains(t, output, "FN:Alice")
+	assert.Contains(t, output, "FN:Alice Johnson\r\n")
+	assert.Contains(t, output, "N:Johnson;Alice;;;")
 	assert.Contains(t, output, "TEL;VALUE=uri:tel:+12125550100")  // +1-212-555-0100 normalized
 	assert.Contains(t, output, "TEL;VALUE=uri:tel:+4155550199")   // (415) 555-0199 → digits + "+"
 	assert.Contains(t, output, "TEL;VALUE=uri:tel:+442079460958") // 44 20 7946 0958 → digits + "+"

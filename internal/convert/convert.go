@@ -3,6 +3,7 @@ package convert
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -21,12 +22,27 @@ type Config struct {
 	Stderr         io.Writer
 }
 
+// Field identifiers accepted as values in Config.HeaderMapping.
 const (
-	FieldName  = "name"
-	FieldPhone = "phone"
-	FieldEmail = "email"
-	FieldOrg   = "org"
+	FieldName       = "name"
+	FieldGivenName  = "given_name"
+	FieldMiddleName = "middle_name"
+	FieldFamilyName = "family_name"
+	FieldPhone      = "phone"
+	FieldEmail      = "email"
+	FieldOrg        = "org"
+	// FieldIgnore drops a column that auto-detection would otherwise map.
+	FieldIgnore = "ignore"
 )
+
+var knownFields = map[string]bool{
+	FieldName: true, FieldGivenName: true, FieldMiddleName: true, FieldFamilyName: true,
+	FieldPhone: true, FieldEmail: true, FieldOrg: true, FieldIgnore: true,
+}
+
+// ErrNoRecognizedColumns is returned by ParseCSV when no header maps to a
+// contact field. Supply Config.HeaderMapping to map columns explicitly.
+var ErrNoRecognizedColumns = errors.New("no contact columns recognized in CSV header")
 
 func (cfg Config) logf(format string, args ...interface{}) {
 	if cfg.Stderr != nil {
@@ -53,15 +69,33 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 
 	headers := make([]string, len(rawHeaders))
 	for i, h := range rawHeaders {
-		headers[i] = strings.TrimSpace(h)
+		headers[i] = strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))
+	}
+
+	for h, f := range cfg.HeaderMapping {
+		if !knownFields[f] {
+			return nil, fmt.Errorf("invalid field %q for column %q: use one of name, given_name, middle_name, family_name, phone, email, org, ignore", f, h)
+		}
 	}
 
 	mapping := buildHeaderMapping(headers, cfg.HeaderMapping)
+	if len(mapping) == 0 {
+		return nil, fmt.Errorf("%w (%s); map columns explicitly, e.g. --map \"%s=name\"",
+			ErrNoRecognizedColumns, strings.Join(headers, ", "), headers[0])
+	}
 
 	if cfg.Verbose {
 		cfg.logf("Detected header mapping:")
-		for h, f := range mapping {
-			cfg.logf("  %q -> %s", h, f)
+		var ignored []string
+		for _, h := range headers {
+			if f, ok := mapping[h]; ok {
+				cfg.logf("  %q -> %s", h, f)
+			} else {
+				ignored = append(ignored, fmt.Sprintf("%q", h))
+			}
+		}
+		if len(ignored) > 0 {
+			cfg.logf("Ignored columns: %s", strings.Join(ignored, ", "))
 		}
 	}
 
@@ -104,6 +138,14 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 func contactFromRow(row []string, headers []string, mapping map[string]string) (model.Contact, []model.ParseError) {
 	var c model.Contact
 	var errs []model.ParseError
+	seenPhones := make(map[string]bool)
+	seenEmails := make(map[string]bool)
+
+	setOnce := func(dst *string, val string) {
+		if *dst == "" {
+			*dst = val
+		}
+	}
 
 	for i, header := range headers {
 		if i >= len(row) {
@@ -121,18 +163,38 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 
 		switch field {
 		case FieldName:
-			if c.Name == "" {
-				c.Name = val
-			}
+			setOnce(&c.Name, val)
+		case FieldGivenName:
+			setOnce(&c.GivenName, val)
+		case FieldMiddleName:
+			setOnce(&c.MiddleName, val)
+		case FieldFamilyName:
+			setOnce(&c.FamilyName, val)
 		case FieldPhone:
-			c.Phones = append(c.Phones, val)
-		case FieldEmail:
-			c.Emails = append(c.Emails, val)
-		case FieldOrg:
-			if c.Organization == "" {
-				c.Organization = val
+			for _, p := range splitMultiValue(val) {
+				key := normalize.PhoneDigits(p)
+				if key == "" {
+					key = p
+				}
+				if !seenPhones[key] {
+					seenPhones[key] = true
+					c.Phones = append(c.Phones, p)
+				}
 			}
+		case FieldEmail:
+			for _, e := range splitMultiValue(val) {
+				if key := strings.ToLower(e); !seenEmails[key] {
+					seenEmails[key] = true
+					c.Emails = append(c.Emails, e)
+				}
+			}
+		case FieldOrg:
+			setOnce(&c.Organization, val)
 		}
+	}
+
+	if c.Name == "" {
+		c.Name = joinNonEmpty(c.GivenName, c.MiddleName, c.FamilyName)
 	}
 
 	if c.Name == "" && len(c.Phones) == 0 && len(c.Emails) == 0 && c.Organization == "" {
@@ -145,19 +207,43 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 	return c, errs
 }
 
+// splitMultiValue splits Google Contacts cells that hold several values
+// separated by " ::: ".
+func splitMultiValue(val string) []string {
+	var out []string
+	for _, part := range strings.Split(val, ":::") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func joinNonEmpty(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " ")
+}
+
 func buildHeaderMapping(headers []string, override map[string]string) map[string]string {
 	mapping := make(map[string]string, len(headers))
 
 	normalizedOverride := make(map[string]string, len(override))
 	for k, v := range override {
-		normalizedOverride[strings.ToLower(k)] = v
+		normalizedOverride[strings.ToLower(strings.TrimSpace(k))] = v
 	}
 
 	for _, header := range headers {
 		lower := strings.ToLower(header)
 
 		if field, ok := normalizedOverride[lower]; ok {
-			mapping[header] = field
+			if field != FieldIgnore {
+				mapping[header] = field
+			}
 			continue
 		}
 
@@ -169,44 +255,98 @@ func buildHeaderMapping(headers []string, override map[string]string) map[string
 	return mapping
 }
 
+var (
+	headerWordRe  = regexp.MustCompile(`\p{L}+`)
+	headerEmailRe = regexp.MustCompile(`\be[\s_\-]?mail`)
+)
+
+// Columns that describe a value (its label or type) or belong to someone
+// other than the contact. Exports from Google and Outlook place these next to
+// the real value columns.
+var skipHeaderWords = wordSet(
+	"label", "type", "title", "prefix", "suffix", "phonetic", "yomi", "nickname",
+	"fax", "pager", "department", "assistant", "manager", "spouse", "emergency",
+	"parent", "guardian", "father", "mother",
+)
+
+var (
+	emailWords      = wordSet("email", "emails")
+	phoneWords      = wordSet("phone", "phones", "telephone", "tel", "mobile", "cell", "cellphone", "whatsapp")
+	phoneJoined     = wordSet("phonenumber", "phoneno", "mobilenumber", "mobileno", "contactnumber", "contactno", "cellnumber")
+	orgWords        = wordSet("org", "organization", "organisation", "company", "employer", "affiliation", "college", "university", "institution")
+	givenWords      = wordSet("first", "given")
+	middleWords     = wordSet("middle", "additional")
+	familyWords     = wordSet("last", "family", "surname")
+	nameWord        = wordSet("name")
+	nameJoined      = wordSet("fullname", "displayname", "contactname")
+	givenJoined     = wordSet("firstname", "givenname", "fname")
+	middleJoined    = wordSet("middlename", "additionalname")
+	familyJoined    = wordSet("lastname", "familyname", "lname")
+	fullNameContext = wordSet(
+		"name", "full", "display", "contact", "your", "student", "participant", "member",
+		"person", "candidate", "applicant", "attendee", "of", "the", "s",
+	)
+)
+
+func wordSet(words ...string) map[string]bool {
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[w] = true
+	}
+	return m
+}
+
+// detectField maps a CSV header to a contact field by its words, so variants
+// like "E-mail 2 Address", "Mobile Phone" or "Phone 1 - Value" are recognized.
 func detectField(header string) string {
-	normalized := normalizeHeader(header)
-	if normalized == "" {
+	h := headerEmailRe.ReplaceAllString(strings.ToLower(header), "email")
+	words := headerWordRe.FindAllString(h, -1)
+	if len(words) == 0 {
 		return ""
+	}
+	joined := strings.Join(words, "")
+
+	has := func(set map[string]bool) bool {
+		for _, w := range words {
+			if set[w] {
+				return true
+			}
+		}
+		return false
+	}
+	only := func(set map[string]bool) bool {
+		for _, w := range words {
+			if !set[w] {
+				return false
+			}
+		}
+		return true
+	}
+	hasName := has(nameWord)
+	namePart := func(set, joinedSet map[string]bool) bool {
+		return joinedSet[joined] || (has(set) && (hasName || len(words) == 1))
 	}
 
 	switch {
-	case regexp.MustCompile(`^(name|fullname|full_name|full-name|contactname|displayname)$`).MatchString(normalized):
-		return FieldName
-	case regexp.MustCompile(`^(first_name|given_name|firstname|givenname)$`).MatchString(normalized):
-		return FieldName
-	case regexp.MustCompile(`^(last_name|family_name|lastname|familyname|surname)$`).MatchString(normalized):
-		return FieldName
-
-	case regexp.MustCompile(`^phone\d*$`).MatchString(normalized):
-		return FieldPhone
-	case regexp.MustCompile(`^(telephone|tel|mobile|cell|phone.number|phonenumber|contactnumber)$`).MatchString(normalized):
-		return FieldPhone
-	case regexp.MustCompile(`^phone_\d+$`).MatchString(normalized):
-		return FieldPhone
-
-	case regexp.MustCompile(`^email\d*$`).MatchString(normalized):
+	case has(skipHeaderWords):
+		return ""
+	case (has(emailWords) || strings.HasPrefix(joined, "email") || joined == "mail") && !hasName:
 		return FieldEmail
-	case regexp.MustCompile(`^(e_mail|email_address|emailaddress|mail)$`).MatchString(normalized):
-		return FieldEmail
-	case regexp.MustCompile(`^email_\d+$`).MatchString(normalized):
-		return FieldEmail
-
-	case regexp.MustCompile(`^(org|organization|organisation|company|employer|affiliation)$`).MatchString(normalized):
+	case has(phoneWords) || phoneJoined[joined]:
+		return FieldPhone
+	case has(orgWords):
 		return FieldOrg
+	case namePart(givenWords, givenJoined):
+		return FieldGivenName
+	case namePart(middleWords, middleJoined):
+		return FieldMiddleName
+	case namePart(familyWords, familyJoined):
+		return FieldFamilyName
+	case nameJoined[joined] || (hasName && only(fullNameContext)):
+		return FieldName
 	}
 
 	return ""
-}
-
-func normalizeHeader(header string) string {
-	re := regexp.MustCompile(`[ _\-]+`)
-	return re.ReplaceAllString(header, "_")
 }
 
 func ContactToVCF(c model.Contact) string {

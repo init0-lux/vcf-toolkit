@@ -15,13 +15,23 @@ type ConversionSummary = internal.ConversionSummary
 type NormalizeVCFConfig = internal.NormalizeVCFConfig
 
 const (
-	FieldName  = internal.FieldName
-	FieldPhone = internal.FieldPhone
-	FieldEmail = internal.FieldEmail
-	FieldOrg   = internal.FieldOrg
+	FieldName       = internal.FieldName
+	FieldGivenName  = internal.FieldGivenName
+	FieldMiddleName = internal.FieldMiddleName
+	FieldFamilyName = internal.FieldFamilyName
+	FieldPhone      = internal.FieldPhone
+	FieldEmail      = internal.FieldEmail
+	FieldOrg        = internal.FieldOrg
+	FieldIgnore     = internal.FieldIgnore
 )
 
+var ErrNoRecognizedColumns = internal.ErrNoRecognizedColumns
+
 var ContactToVCF = internal.ContactToVCF
+
+func NormalizeContact(c Contact, cfg NormalizeVCFConfig) Contact {
+	return internal.NormalizeContact(c, cfg)
+}
 
 func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) { return internal.ParseCSV(r, cfg) }
 

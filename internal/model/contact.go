@@ -6,8 +6,13 @@ type SourceInfo struct {
 }
 
 type Contact struct {
-	ID           string
-	Name         string
+	ID   string
+	Name string
+	// GivenName, MiddleName and FamilyName are set when the source had separate
+	// name columns. They take precedence over splitting Name for structured output.
+	GivenName    string
+	MiddleName   string
+	FamilyName   string
 	Phones       []string
 	Emails       []string
 	Organization string

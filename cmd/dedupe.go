@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/init0-lux/vcf-toolkit/internal/dedupe"
@@ -54,6 +53,7 @@ func init() {
 
 	dedupeCmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "output as JSON")
 	dedupeCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview clusters without writing output")
+	addCSVFlags(dedupeCmd)
 
 	dedupeCmd.Flags().Float64VarP(&dFlags.emailWeight, "email-weight", "", 0.40, "email match weight (0.0–1.0)")
 	dedupeCmd.Flags().Float64VarP(&dFlags.phoneWeight, "phone-weight", "", 0.35, "phone match weight (0.0–1.0)")
@@ -76,10 +76,11 @@ func runDedupe(cmd *cobra.Command, args []string) error {
 	}
 	defer w.Close()
 
-	contacts, err := parseContacts(r)
+	parsed, err := parseCSVInput(cmd, r)
 	if err != nil {
 		return fmt.Errorf("parsing contacts: %w", err)
 	}
+	contacts := parsed.Contacts
 	if len(contacts) == 0 {
 		fmt.Fprintln(cmd.ErrOrStderr(), "no contacts found")
 		return nil
@@ -112,77 +113,6 @@ func runDedupe(cmd *cobra.Command, args []string) error {
 		return outputJSON(w, result)
 	}
 	return outputMergedCSV(w, result)
-}
-
-func parseContacts(r io.Reader) ([]model.Contact, error) {
-	reader := csv.NewReader(r)
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-
-	headers, err := reader.Read()
-	if err != nil {
-		return nil, fmt.Errorf("reading CSV headers: %w", err)
-	}
-	for i, h := range headers {
-		headers[i] = strings.TrimSpace(h)
-	}
-
-	mapping := buildMapping(headers)
-	var contacts []model.Contact
-	line := 2
-
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "line %d: read error: %v\n", line, err)
-			line++
-			continue
-		}
-
-		c := rowToContact(record, headers, mapping)
-		if c.Name != "" || len(c.Phones) > 0 || len(c.Emails) > 0 {
-			c.Source.Row = line
-			contacts = append(contacts, c)
-		}
-		line++
-	}
-	return contacts, nil
-}
-
-func rowToContact(record, headers []string, mapping map[string]string) model.Contact {
-	var c model.Contact
-	for i, header := range headers {
-		if i >= len(record) {
-			break
-		}
-		val := strings.TrimSpace(record[i])
-		if val == "" {
-			continue
-		}
-		field, ok := mapping[header]
-		if !ok {
-			continue
-		}
-		switch field {
-		case "name":
-			if c.Name == "" {
-				c.Name = val
-			}
-		case "phone":
-			c.Phones = append(c.Phones, val)
-		case "email":
-			c.Emails = append(c.Emails, val)
-		case "org":
-			if c.Organization == "" {
-				c.Organization = val
-			}
-		}
-	}
-	return c
 }
 
 func outputDryRun(cmd *cobra.Command, result model.DedupeResult) error {

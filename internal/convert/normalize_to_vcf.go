@@ -51,7 +51,7 @@ func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*Conve
 
 	contacts := make([]model.Contact, 0, len(result.Contacts))
 	for _, c := range result.Contacts {
-		contacts = append(contacts, normalizeContact(c, cfg))
+		contacts = append(contacts, NormalizeContact(c, cfg))
 	}
 
 	if cfg.Deduplicate && len(contacts) > 0 {
@@ -96,7 +96,9 @@ func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*Conve
 	}, nil
 }
 
-func normalizeContact(c model.Contact, cfg NormalizeVCFConfig) model.Contact {
+// NormalizeContact applies the name, phone and email normalizers from cfg to a
+// parsed contact. Values that fail normalization are kept as typed.
+func NormalizeContact(c model.Contact, cfg NormalizeVCFConfig) model.Contact {
 	out := c
 
 	// Name normalization may also provide organization hints.
