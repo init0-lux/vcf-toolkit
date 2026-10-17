@@ -582,7 +582,6 @@ func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM, country string) (
 
 	cfg := convert.NormalizeVCFConfig{
 		Phone: normalize.PhoneConfig{DefaultCountry: country},
-		Email: normalize.EmailConfig{StripAliases: true},
 	}
 	if llm != nil {
 		cfg.Name = normalize.NameConfig{UseLLM: true, LLMClient: llm}

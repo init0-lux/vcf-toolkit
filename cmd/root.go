@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	outputFile string
-	jsonOutput bool
-	dryRun     bool
-	verbose    bool
-	dedupeFlag bool
+	outputFile   string
+	jsonOutput   bool
+	dryRun       bool
+	verbose      bool
+	dedupeFlag   bool
+	stripAliases bool
 )
 
 var rootCmd = &cobra.Command{

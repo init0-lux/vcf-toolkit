@@ -404,13 +404,15 @@ func TestContactToVCF_PhoneNormalization(t *testing.T) {
 	}
 }
 
-func TestContactToVCF_EmailAliasStripped(t *testing.T) {
+func TestContactToVCF_EmailPreserved(t *testing.T) {
 	c := model.Contact{
 		Name:   "Test",
-		Emails: []string{"user+tag@example.com"},
+		Emails: []string{"User+Tag@Example.com", "  spaced@example.com  "},
 	}
 	vcf := ContactToVCF(c)
-	assert.Contains(t, vcf, "EMAIL:user@example.com")
+	// Plus-addresses and case are part of the address the contact gave.
+	assert.Contains(t, vcf, "EMAIL:User+Tag@Example.com\r\n")
+	assert.Contains(t, vcf, "EMAIL:spaced@example.com\r\n")
 }
 
 func TestContactToVCF_InvalidEmail(t *testing.T) {
@@ -737,7 +739,7 @@ Charlie,Brown,charlie+spam@test.co,44 20 7946 0958,Tech Ltd
 	assert.Equal(t, 2, result.LocalPhones)
 	assert.Contains(t, output, "EMAIL:alice.j@company.com")
 	assert.Contains(t, output, "EMAIL:bob.smith@example.org")
-	assert.Contains(t, output, "EMAIL:charlie@test.co") // plus-alias stripped
+	assert.Contains(t, output, "EMAIL:charlie+spam@test.co\r\n")
 	assert.Contains(t, output, "ORG:Acme Corp")
 	assert.Contains(t, output, "ORG:Globex Inc")
 	assert.Contains(t, output, "ORG:Tech Ltd")

@@ -388,14 +388,9 @@ func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
 		}
 	}
 
+	// Emails are written as given; use NormalizeContact to normalize them first.
 	for _, email := range c.Emails {
-		normalized := normalize.NormalizeEmail(email, normalize.EmailConfig{
-			StripAliases:     true,
-			StrictValidation: false,
-		})
-		if normalized.Valid && normalized.Normalized != "" {
-			b.WriteString(fmt.Sprintf("EMAIL:%s\r\n", normalized.Normalized))
-		} else {
+		if email = strings.TrimSpace(email); email != "" {
 			b.WriteString(fmt.Sprintf("EMAIL:%s\r\n", escapeVCF(email)))
 		}
 	}

@@ -25,6 +25,7 @@ Examples:
   vcf-toolkit normalize contacts.csv --out clean.csv
   vcf-toolkit normalize contacts.csv --json
   vcf-toolkit normalize contacts.csv --country +91
+  vcf-toolkit normalize contacts.csv --strip-aliases
 `,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runNormalize,
@@ -35,6 +36,7 @@ func init() {
 	normalizeCmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "output as JSON")
 	addCSVFlags(normalizeCmd)
 	addCountryFlag(normalizeCmd)
+	normalizeCmd.Flags().BoolVar(&stripAliases, "strip-aliases", false, "remove +tag aliases from email addresses (user+tag@x.com -> user@x.com)")
 }
 
 func runNormalize(cmd *cobra.Command, args []string) error {
@@ -65,7 +67,7 @@ func runNormalize(cmd *cobra.Command, args []string) error {
 	for _, c := range result.Contacts {
 		n := convert.NormalizeContact(c, convert.NormalizeVCFConfig{
 			Phone: normalize.PhoneConfig{DefaultCountry: country},
-			Email: normalize.EmailConfig{StripAliases: true},
+			Email: normalize.EmailConfig{StripAliases: stripAliases},
 		})
 		for _, p := range n.Phones {
 			if !strings.HasPrefix(p, "+") {
