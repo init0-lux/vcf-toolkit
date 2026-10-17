@@ -27,7 +27,9 @@ func DefaultConfig() Config {
 		NameFuzzyWeight:    0.20,
 		OrganizationWeight: 0.05,
 		Threshold:          0.50,
-		MinNameSimilarity:  0.60,
+		// Jaro-Winkler scores unrelated names around 0.5-0.7, so a lower floor
+		// lets a shared phone plus a coincidental name score merge strangers.
+		MinNameSimilarity: 0.80,
 	}
 }
 
@@ -289,6 +291,26 @@ func (ds *disjointSet) union(a, b int) {
 	}
 	ds.parent[rb] = ra
 	ds.rank[ra]++
+}
+
+// Representatives returns one contact per cluster in input order: singletons
+// as they are and each duplicate cluster as its merged contact.
+func Representatives(result model.DedupeResult) []model.Contact {
+	out := make([]model.Contact, 0, len(result.Clusters))
+	mergeIdx := 0
+	for _, cluster := range result.Clusters {
+		switch {
+		case len(cluster) == 0:
+		case len(cluster) == 1:
+			out = append(out, cluster[0])
+		case mergeIdx < len(result.Merged):
+			out = append(out, result.Merged[mergeIdx].Contact)
+			mergeIdx++
+		default:
+			out = append(out, cluster[0])
+		}
+	}
+	return out
 }
 
 func mergeClusters(clusters [][]model.Contact) []model.MergedContact {

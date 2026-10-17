@@ -155,9 +155,10 @@ Jane,Smith,+1-555-0101
 	result, err := ParseCSV(r, Config{})
 	require.NoError(t, err)
 	require.Len(t, result.Contacts, 2)
-	// Both first name and last name map to "name" field, so first name wins
-	assert.Equal(t, "John", result.Contacts[0].Name)
-	assert.Equal(t, "Jane", result.Contacts[1].Name)
+	assert.Equal(t, "John Doe", result.Contacts[0].Name)
+	assert.Equal(t, "John", result.Contacts[0].GivenName)
+	assert.Equal(t, "Doe", result.Contacts[0].FamilyName)
+	assert.Equal(t, "Jane Smith", result.Contacts[1].Name)
 }
 
 func TestParseCSV_UnknownHeadersIgnored(t *testing.T) {
@@ -166,10 +167,9 @@ val1,val2,val3
 val4,val5,val6
 `
 	r := strings.NewReader(input)
-	result, err := ParseCSV(r, Config{})
-	require.NoError(t, err)
-	require.Len(t, result.Contacts, 0)
-	require.Len(t, result.Errors, 2) // both rows have no recognizable fields
+	_, err := ParseCSV(r, Config{})
+	require.ErrorIs(t, err, ErrNoRecognizedColumns)
+	assert.Contains(t, err.Error(), "colA, colB, colC")
 }
 
 func TestParseCSV_SourceRowNumbers(t *testing.T) {
@@ -213,11 +213,18 @@ func TestDetectField(t *testing.T) {
 		{"full-name", FieldName},
 		{"contactname", FieldName},
 		{"displayname", FieldName},
-		{"first name", FieldName},
-		{"last name", FieldName},
-		{"givenname", FieldName},
-		{"family name", FieldName},
-		{"surname", FieldName},
+		{"Your Name", FieldName},
+		{"Name of Participant", FieldName},
+		{"Display Name", FieldName},
+		{"first name", FieldGivenName},
+		{"firstname", FieldGivenName},
+		{"givenname", FieldGivenName},
+		{"Given Name", FieldGivenName},
+		{"Middle Name", FieldMiddleName},
+		{"Additional Name", FieldMiddleName},
+		{"last name", FieldFamilyName},
+		{"family name", FieldFamilyName},
+		{"surname", FieldFamilyName},
 
 		{"phone", FieldPhone},
 		{"Phone", FieldPhone},
@@ -231,6 +238,12 @@ func TestDetectField(t *testing.T) {
 		{"mobile", FieldPhone},
 		{"cell", FieldPhone},
 		{"contactnumber", FieldPhone},
+		{"Contact Number", FieldPhone},
+		{"Mobile Phone", FieldPhone},
+		{"Business Phone", FieldPhone},
+		{"Mobile No.", FieldPhone},
+		{"WhatsApp Number", FieldPhone},
+		{"Phone 1 - Value", FieldPhone},
 
 		{"email", FieldEmail},
 		{"Email", FieldEmail},
@@ -240,6 +253,11 @@ func TestDetectField(t *testing.T) {
 		{"email_address", FieldEmail},
 		{"e-mail", FieldEmail},
 		{"mail", FieldEmail},
+		{"E-mail Address", FieldEmail},
+		{"E-mail 2 Address", FieldEmail},
+		{"E-mail 1 - Value", FieldEmail},
+		{"Primary Email", FieldEmail},
+		{"emailaddress", FieldEmail},
 
 		{"org", FieldOrg},
 		{"Org", FieldOrg},
@@ -248,11 +266,35 @@ func TestDetectField(t *testing.T) {
 		{"company", FieldOrg},
 		{"employer", FieldOrg},
 		{"affiliation", FieldOrg},
+		{"Organization Name", FieldOrg},
+		{"Organization 1 - Name", FieldOrg},
+		{"Company Name", FieldOrg},
+		{"College", FieldOrg},
 
 		{"unknown", ""},
 		{"notes", ""},
 		{"id", ""},
 		{"address", ""},
+		// Labels, types and metadata columns next to real values.
+		{"Phone 1 - Label", ""},
+		{"E-mail 1 - Type", ""},
+		{"E-mail Type", ""},
+		{"E-mail Display Name", ""},
+		{"Job Title", ""},
+		{"Organization Title", ""},
+		{"Organization 1 - Yomi Name", ""},
+		{"Phonetic First Name", ""},
+		{"Name Prefix", ""},
+		{"Name Suffix", ""},
+		{"Nickname", ""},
+		{"Business Fax", ""},
+		{"Pager", ""},
+		{"Assistant's Phone", ""},
+		{"Manager's Name", ""},
+		{"Emergency Contact Number", ""},
+		{"Team Name", ""},
+		{"Short Name", ""},
+		{"Last Modified", ""},
 	}
 
 	for _, tt := range tests {
@@ -331,9 +373,8 @@ func TestContactToVCF_EscapeCharacters(t *testing.T) {
 	}
 	vcf := ContactToVCF(c)
 	assert.Contains(t, vcf, "FN:Doe\\, John & Jane")
-	// structuredName splits on spaces: first word = given, last word = family.
-	// For "Doe, John & Jane": given="Doe," (comma from original), middle="John &", family="Jane"
-	assert.Contains(t, vcf, "N:Jane;Doe\\,;John &;;")
+	// "Family, Given" form: everything after the comma is the given name.
+	assert.Contains(t, vcf, "N:Doe;John & Jane;;;")
 	assert.Contains(t, vcf, "ORG:Acme\\;Corp")
 }
 
@@ -344,7 +385,9 @@ func TestContactToVCF_PhoneNormalization(t *testing.T) {
 		wantTel string
 	}{
 		{"US number with formatting", "+1 (555) 0100", "TEL;VALUE=uri:tel:+15550100"},
-		{"US number without plus", "15550100", "TEL;VALUE=uri:tel:+15550100"},
+		{"local number is kept as typed", "15550100", "TEL;VALUE=text:15550100\r\n"},
+		{"local number with formatting is kept as typed", "(212) 555-0101", "TEL;VALUE=text:(212) 555-0101\r\n"},
+		{"00 international prefix", "0044 20 7946 0958", "TEL;VALUE=uri:tel:+442079460958"},
 		{"Indian number", "+91 98765 43210", "TEL;VALUE=uri:tel:+919876543210"},
 		{"UK number", "+44 20 7946 0958", "TEL;VALUE=uri:tel:+442079460958"},
 	}
@@ -361,13 +404,15 @@ func TestContactToVCF_PhoneNormalization(t *testing.T) {
 	}
 }
 
-func TestContactToVCF_EmailAliasStripped(t *testing.T) {
+func TestContactToVCF_EmailPreserved(t *testing.T) {
 	c := model.Contact{
 		Name:   "Test",
-		Emails: []string{"user+tag@example.com"},
+		Emails: []string{"User+Tag@Example.com", "  spaced@example.com  "},
 	}
 	vcf := ContactToVCF(c)
-	assert.Contains(t, vcf, "EMAIL:user@example.com")
+	// Plus-addresses and case are part of the address the contact gave.
+	assert.Contains(t, vcf, "EMAIL:User+Tag@Example.com\r\n")
+	assert.Contains(t, vcf, "EMAIL:spaced@example.com\r\n")
 }
 
 func TestContactToVCF_InvalidEmail(t *testing.T) {
@@ -545,11 +590,37 @@ func TestStructuredName(t *testing.T) {
 		{"John Doe", "Doe;John;;;"},
 		{"John Michael Doe", "Doe;John;Michael;;"},
 		{"  spaces  here  ", "here;spaces;;;"},
+		{"Doe, John", "Doe;John;;;"},
+		{"Doe, John Michael", "Doe;John Michael;;;"},
+		{"Doe, John & Jane", "Doe;John & Jane;;;"},
+		{"John Smith, Jr.", "Smith;John;;;Jr."},
+		{"Martin Luther King, Jr", "King;Martin;Luther;;Jr"},
+		{"Ada Lovelace, PhD", "Lovelace;Ada;;;PhD"},
+		{"Acme, Inc.", ";Acme\\, Inc.;;;"},
+		{"a, b, c", "c;a\\,;b\\,;;"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("name=%q", tt.input), func(t *testing.T) {
-			got := structuredName(tt.input)
+			got := structuredName(model.Contact{Name: tt.input})
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestStructuredName_FromParts(t *testing.T) {
+	tests := []struct {
+		name string
+		c    model.Contact
+		want string
+	}{
+		{"multi-word parts", model.Contact{Name: "Mary Ann van der Berg", GivenName: "Mary Ann", FamilyName: "van der Berg"}, "van der Berg;Mary Ann;;;"},
+		{"with middle", model.Contact{GivenName: "Jane", MiddleName: "Q", FamilyName: "Public"}, "Public;Jane;Q;;"},
+		{"given only", model.Contact{Name: "Cher", GivenName: "Cher"}, ";Cher;;;"},
+		{"escapes parts", model.Contact{GivenName: "Jo;e", FamilyName: "O,Neil"}, "O\\,Neil;Jo\\;e;;;"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, structuredName(tt.c))
 		})
 	}
 }
@@ -630,14 +701,14 @@ func TestContactFromRow(t *testing.T) {
 		assert.Equal(t, "Org", c.Organization)
 	})
 
-	t.Run("first name takes precedence over last name", func(t *testing.T) {
+	t.Run("first and last name are combined", func(t *testing.T) {
 		row := []string{"John", "Doe"}
 		headers := []string{"first name", "last name"}
 		mapping := buildHeaderMapping(headers, nil)
 
 		c, errs := contactFromRow(row, headers, mapping)
 		assert.Len(t, errs, 0)
-		assert.Equal(t, "John", c.Name) // first name wins
+		assert.Equal(t, "John Doe", c.Name)
 	})
 }
 
@@ -658,18 +729,66 @@ Charlie,Brown,charlie+spam@test.co,44 20 7946 0958,Tech Ltd
 	assert.Len(t, result.ParseErrors, 0)
 
 	output := buf.String()
-	// First name used as Name
-	assert.Contains(t, output, "FN:Alice")
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+12125550100")  // +1-212-555-0100 normalized
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+4155550199")   // (415) 555-0199 → digits + "+"
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+442079460958") // 44 20 7946 0958 → digits + "+"
+	assert.Contains(t, output, "FN:Alice Johnson\r\n")
+	assert.Contains(t, output, "N:Johnson;Alice;;;")
+	assert.Contains(t, output, "TEL;VALUE=uri:tel:+12125550100") // +1-212-555-0100 normalized
+	// Numbers without a "+" are written as typed rather than given a guessed country.
+	assert.Contains(t, output, "TEL;VALUE=text:(415) 555-0199\r\n")
+	assert.Contains(t, output, "TEL;VALUE=text:44 20 7946 0958\r\n")
+	assert.NotContains(t, output, "tel:+4155550199")
+	assert.Equal(t, 2, result.LocalPhones)
 	assert.Contains(t, output, "EMAIL:alice.j@company.com")
 	assert.Contains(t, output, "EMAIL:bob.smith@example.org")
-	assert.Contains(t, output, "EMAIL:charlie@test.co") // plus-alias stripped
+	assert.Contains(t, output, "EMAIL:charlie+spam@test.co\r\n")
 	assert.Contains(t, output, "ORG:Acme Corp")
 	assert.Contains(t, output, "ORG:Globex Inc")
 	assert.Contains(t, output, "ORG:Tech Ltd")
 
 	// Verify CRLF line endings
 	assert.Contains(t, output, "\r\n")
+}
+
+func TestContactToVCFWithOptions_DefaultCountry(t *testing.T) {
+	c := model.Contact{
+		Name:   "Test",
+		Phones: []string{"(212) 555-0101", "+44 20 7946 0958", "555-0199"},
+	}
+	vcf := ContactToVCFWithOptions(c, VCFOptions{DefaultCountry: "+1"})
+	assert.Contains(t, vcf, "TEL;VALUE=uri:tel:+12125550101\r\n")
+	assert.Contains(t, vcf, "TEL;VALUE=uri:tel:+442079460958\r\n")
+	// Too short for a US number: kept as typed instead of guessed.
+	assert.Contains(t, vcf, "TEL;VALUE=text:555-0199\r\n")
+}
+
+func TestConvertCSVToVCF_DefaultCountry(t *testing.T) {
+	input := "name,phone\nPriya,98765 43210\nRavi,+91 91234 56789\n"
+	var buf bytes.Buffer
+	result, err := ConvertCSVToVCF(strings.NewReader(input), &buf, Config{DefaultCountry: "+91"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.LocalPhones)
+	assert.Contains(t, buf.String(), "TEL;VALUE=uri:tel:+919876543210\r\n")
+	assert.Contains(t, buf.String(), "TEL;VALUE=uri:tel:+919123456789\r\n")
+}
+
+func TestConvertCSVToVCF_InvalidDefaultCountry(t *testing.T) {
+	input := "name,phone\nPriya,98765 43210\n"
+	_, err := ConvertCSVToVCF(strings.NewReader(input), &bytes.Buffer{}, Config{DefaultCountry: "IN"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"IN"`)
+}
+
+func TestContactToVCF_FNFromNameParts(t *testing.T) {
+	vcf := ContactToVCF(model.Contact{GivenName: "Ada", FamilyName: "Lovelace"})
+	assert.Contains(t, vcf, "FN:Ada Lovelace\r\n")
+	assert.Contains(t, vcf, "N:Lovelace;Ada;;;")
+}
+
+func TestConvertCSVToVCF_DedupeUsesDefaultCountry(t *testing.T) {
+	// The same number with and without its country code is one phone.
+	input := "name,phone\nPriya Sharma,+91 98765 43210\nPriya Sharma,98765 43210\n"
+	var buf bytes.Buffer
+	result, err := ConvertCSVToVCF(strings.NewReader(input), &buf, Config{DefaultCountry: "+91", Deduplicate: true})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.OutputVCards)
+	assert.Equal(t, 1, strings.Count(buf.String(), "TEL;"))
 }

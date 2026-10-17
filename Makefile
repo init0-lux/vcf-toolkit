@@ -1,5 +1,5 @@
-BINARY_NAME=vcf
-VERSION=0.0.1
+BINARY_NAME=vcf-toolkit
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_DIR=bin
 
 LDFLAGS=-ldflags "-s -w -X main.version=${VERSION}"
@@ -21,14 +21,14 @@ test:
 
 build:
 	@echo "building binary"
-	go build ${LDFLAGS} -o ${BUILD_DIR}/${BINARY_NAME} main.go
+	go build ${LDFLAGS} -o ${BUILD_DIR}/${BINARY_NAME} .
 
 clean:
 	@echo "cleaning build artifacts..."
 	rm -rf ${BUILD_DIR}
 
 run:
-	go run main.go
+	go run .
 
 run-bin:
 	@echo "running the binary..."

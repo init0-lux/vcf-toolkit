@@ -16,6 +16,7 @@ var ErrNoLLMClient = internal.ErrNoLLMClient
 var NormalizeName = internal.NormalizeName
 var NormalizePhone = internal.NormalizePhone
 var NormalizeEmail = internal.NormalizeEmail
+var NormalizeCountryCode = internal.NormalizeCountryCode
 
 // Helpers used by other packages (dedupe) and by SDK consumers.
 var NormalizeEmailStr = internal.NormalizeEmailStr

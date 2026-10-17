@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	outputFile string
-	jsonOutput bool
-	dryRun     bool
-	verbose    bool
-	dedupeFlag bool
+	outputFile   string
+	jsonOutput   bool
+	dryRun       bool
+	verbose      bool
+	dedupeFlag   bool
+	stripAliases bool
 )
 
 var rootCmd = &cobra.Command{
@@ -30,7 +31,8 @@ Documentation: https://github.com/init0-lux/vcf-toolkit`,
 	SilenceErrors: true,
 }
 
-func Execute() {
+func Execute(version string) {
+	rootCmd.Version = version
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

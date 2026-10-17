@@ -481,6 +481,11 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 			return runDoneMsg{err: fmt.Errorf("input path is required")}
 		}
 
+		country, err := defaultCountry()
+		if err != nil {
+			return runDoneMsg{err: err}
+		}
+
 		inFile, err := os.Open(in)
 		if err != nil {
 			return runDoneMsg{err: err}
@@ -510,7 +515,7 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 
 		switch flow {
 		case flowNormalizeCSV, flowNormalizeJSON, flowNormalizeVCF, flowNormalizeDedupeCSV, flowNormalizeDedupeVCF:
-			contacts, err := parseAndNormalizeRows(inFile, llm)
+			contacts, err := parseAndNormalizeRows(inFile, llm, country)
 			if err != nil {
 				return runDoneMsg{err: err}
 			}
@@ -525,16 +530,17 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 			case flowNormalizeJSON:
 				return runDoneMsg{err: writeJSON(w, contacts)}
 			case flowNormalizeVCF, flowNormalizeDedupeVCF:
-				return runDoneMsg{err: writeVCF(w, contacts, verbose, m.errOut)}
+				return runDoneMsg{err: writeVCF(w, contacts, country)}
 			default:
 				return runDoneMsg{err: writeCSV(w, contacts)}
 			}
 
 		case flowConvertVCF, flowConvertDedupeVCF:
 			_, err := convert.ConvertCSVToVCF(inFile, w, convert.Config{
-				Deduplicate: flow == flowConvertDedupeVCF,
-				Verbose:     verbose,
-				Stderr:      m.errOut,
+				DefaultCountry: country,
+				Deduplicate:    flow == flowConvertDedupeVCF,
+				Verbose:        verbose,
+				Stderr:         m.errOut,
 			})
 			return runDoneMsg{err: err}
 
@@ -566,134 +572,40 @@ type normalizedContact struct {
 	Phones []string `json:"phones"`
 	Emails []string `json:"emails"`
 	Org    string   `json:"org"`
+
+	// Name parts from separate columns, kept for the vCard N field.
+	GivenName  string `json:"-"`
+	MiddleName string `json:"-"`
+	FamilyName string `json:"-"`
 }
 
-func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM) ([]normalizedContact, error) {
-	reader := csv.NewReader(r)
-	reader.TrimLeadingSpace = true
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-
-	rawHeaders, err := reader.Read()
+func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM, country string) ([]normalizedContact, error) {
+	result, err := convert.ParseCSV(r, convert.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("reading CSV headers: %w", err)
+		return nil, err
 	}
-	headers := make([]string, len(rawHeaders))
-	for i, h := range rawHeaders {
-		headers[i] = strings.TrimSpace(h)
-	}
-	mapping := buildMapping(headers)
 
-	var contacts []normalizedContact
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			continue
-		}
-		nc := normalizeRow(record, headers, mapping, llm)
-		if nc.Name != "" || len(nc.Phones) > 0 || len(nc.Emails) > 0 || nc.Org != "" {
-			contacts = append(contacts, nc)
-		}
+	cfg := convert.NormalizeVCFConfig{
+		Phone: normalize.PhoneConfig{DefaultCountry: country},
+	}
+	if llm != nil {
+		cfg.Name = normalize.NameConfig{UseLLM: true, LLMClient: llm}
+	}
+
+	contacts := make([]normalizedContact, 0, len(result.Contacts))
+	for _, c := range result.Contacts {
+		n := convert.NormalizeContact(c, cfg)
+		contacts = append(contacts, normalizedContact{
+			Name:       n.Name,
+			GivenName:  n.GivenName,
+			MiddleName: n.MiddleName,
+			FamilyName: n.FamilyName,
+			Phones:     n.Phones,
+			Emails:     n.Emails,
+			Org:        n.Organization,
+		})
 	}
 	return contacts, nil
-}
-
-func buildMapping(headers []string) map[string]string {
-	mapping := make(map[string]string, len(headers))
-	for _, header := range headers {
-		key := fieldKey(header)
-		if key != "" {
-			mapping[header] = key
-		}
-	}
-	return mapping
-}
-
-func fieldKey(header string) string {
-	s := strings.ToLower(header)
-	s = strings.NewReplacer(" ", "_", "-", "_").Replace(s)
-	switch {
-	case matchesAny(s,
-		"name", "fullname", "full_name",
-		"contactname", "displayname",
-		"first_name", "firstname", "given_name", "givenname",
-		"last_name", "lastname", "family_name", "familyname", "surname"):
-		return "name"
-	case matchesAny(s,
-		"phone", "telephone", "tel", "mobile", "cell",
-		"phone_number", "phonenumber", "contactnumber"):
-		return "phone"
-	case matchesAny(s,
-		"email", "e_mail", "email_address", "emailaddress", "mail"):
-		return "email"
-	case matchesAny(s,
-		"org", "organization", "organisation", "company", "employer", "affiliation"):
-		return "org"
-	}
-	return ""
-}
-
-func matchesAny(s string, vals ...string) bool {
-	for _, v := range vals {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeRow(record, headers []string, mapping map[string]string, llm normalize.NameLLM) normalizedContact {
-	var nc normalizedContact
-	for i, header := range headers {
-		if i >= len(record) {
-			break
-		}
-		val := strings.TrimSpace(record[i])
-		if val == "" {
-			continue
-		}
-		field, ok := mapping[header]
-		if !ok {
-			continue
-		}
-		switch field {
-		case "name":
-			cfg := normalize.NameConfig{}
-			if llm != nil {
-				cfg.UseLLM = true
-				cfg.LLMClient = llm
-			}
-			n := normalize.NormalizeName(val, cfg)
-			if n.Normalized && n.FullName != "" {
-				nc.Name = n.FullName
-				if nc.Org == "" && n.Organization != "" {
-					nc.Org = n.Organization
-				}
-			} else if nc.Name == "" {
-				nc.Name = val
-			}
-		case "phone":
-			if p := normalize.NormalizePhone(val, normalize.PhoneConfig{}); p.Valid && p.Normalized != "" {
-				nc.Phones = append(nc.Phones, p.Normalized)
-			} else {
-				nc.Phones = append(nc.Phones, val)
-			}
-		case "email":
-			if e := normalize.NormalizeEmail(val, normalize.EmailConfig{StripAliases: true}); e.Valid && e.Normalized != "" {
-				nc.Emails = append(nc.Emails, e.Normalized)
-			} else {
-				nc.Emails = append(nc.Emails, val)
-			}
-		case "org":
-			if nc.Org == "" {
-				nc.Org = val
-			}
-		}
-	}
-	return nc
 }
 
 func toModelContacts(in []normalizedContact) []model.Contact {
@@ -701,6 +613,9 @@ func toModelContacts(in []normalizedContact) []model.Contact {
 	for _, c := range in {
 		out = append(out, model.Contact{
 			Name:         c.Name,
+			GivenName:    c.GivenName,
+			MiddleName:   c.MiddleName,
+			FamilyName:   c.FamilyName,
 			Phones:       append([]string(nil), c.Phones...),
 			Emails:       append([]string(nil), c.Emails...),
 			Organization: c.Org,
@@ -710,30 +625,17 @@ func toModelContacts(in []normalizedContact) []model.Contact {
 }
 
 func fromMergedContacts(result model.DedupeResult) []normalizedContact {
-	if len(result.Merged) == 0 {
-		var out []normalizedContact
-		for _, cl := range result.Clusters {
-			if len(cl) != 1 {
-				continue
-			}
-			c := cl[0]
-			out = append(out, normalizedContact{
-				Name:   c.Name,
-				Phones: append([]string(nil), c.Phones...),
-				Emails: append([]string(nil), c.Emails...),
-				Org:    c.Organization,
-			})
-		}
-		return out
-	}
-
-	out := make([]normalizedContact, 0, len(result.Merged))
-	for _, mc := range result.Merged {
+	reps := dedupe.Representatives(result)
+	out := make([]normalizedContact, 0, len(reps))
+	for _, c := range reps {
 		out = append(out, normalizedContact{
-			Name:   mc.Contact.Name,
-			Phones: append([]string(nil), mc.Contact.Phones...),
-			Emails: append([]string(nil), mc.Contact.Emails...),
-			Org:    mc.Contact.Organization,
+			Name:       c.Name,
+			GivenName:  c.GivenName,
+			MiddleName: c.MiddleName,
+			FamilyName: c.FamilyName,
+			Phones:     append([]string(nil), c.Phones...),
+			Emails:     append([]string(nil), c.Emails...),
+			Org:        c.Organization,
 		})
 	}
 	return out
@@ -765,28 +667,12 @@ func writeCSV(w io.Writer, contacts []normalizedContact) error {
 	return writer.Error()
 }
 
-func writeVCF(w io.Writer, contacts []normalizedContact, verbose bool, errOut io.Writer) error {
-	pr, pw := io.Pipe()
-
-	go func() {
-		cw := csv.NewWriter(pw)
-		_ = cw.Write([]string{"name", "phone", "email", "org"})
-		for _, c := range contacts {
-			_ = cw.Write([]string{
-				c.Name,
-				strings.Join(c.Phones, "; "),
-				strings.Join(c.Emails, "; "),
-				c.Org,
-			})
+func writeVCF(w io.Writer, contacts []normalizedContact, country string) error {
+	for _, c := range toModelContacts(contacts) {
+		vcf := convert.ContactToVCFWithOptions(c, convert.VCFOptions{DefaultCountry: country})
+		if _, err := io.WriteString(w, vcf); err != nil {
+			return err
 		}
-		cw.Flush()
-		_ = pw.CloseWithError(cw.Error())
-	}()
-
-	_, err := convert.ConvertCSVToVCF(pr, w, convert.Config{
-		Deduplicate: false,
-		Verbose:     verbose,
-		Stderr:      errOut,
-	})
-	return err
+	}
+	return nil
 }

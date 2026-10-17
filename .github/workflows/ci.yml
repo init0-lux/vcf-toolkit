@@ -20,5 +20,11 @@ jobs:
         with:
           go-version: "1.24.2"
           cache: true
+      - name: Vet
+        run: go vet ./...
       - name: Run tests
         run: go test ./...
+      - name: Verify npm package contents
+        run: |
+          cd npm
+          npm pack --dry-run 2>&1 | grep 'bin/vcf-toolkit.js'

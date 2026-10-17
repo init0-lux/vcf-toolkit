@@ -3,6 +3,7 @@ package convert
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -14,6 +15,8 @@ import (
 )
 
 type Config struct {
+	// DefaultCountry is the calling code (e.g. "+91") for phone numbers written
+	// without one. When empty, such numbers are written to the vCard as typed.
 	DefaultCountry string
 	HeaderMapping  map[string]string
 	Deduplicate    bool
@@ -21,12 +24,27 @@ type Config struct {
 	Stderr         io.Writer
 }
 
+// Field identifiers accepted as values in Config.HeaderMapping.
 const (
-	FieldName  = "name"
-	FieldPhone = "phone"
-	FieldEmail = "email"
-	FieldOrg   = "org"
+	FieldName       = "name"
+	FieldGivenName  = "given_name"
+	FieldMiddleName = "middle_name"
+	FieldFamilyName = "family_name"
+	FieldPhone      = "phone"
+	FieldEmail      = "email"
+	FieldOrg        = "org"
+	// FieldIgnore drops a column that auto-detection would otherwise map.
+	FieldIgnore = "ignore"
 )
+
+var knownFields = map[string]bool{
+	FieldName: true, FieldGivenName: true, FieldMiddleName: true, FieldFamilyName: true,
+	FieldPhone: true, FieldEmail: true, FieldOrg: true, FieldIgnore: true,
+}
+
+// ErrNoRecognizedColumns is returned by ParseCSV when no header maps to a
+// contact field. Supply Config.HeaderMapping to map columns explicitly.
+var ErrNoRecognizedColumns = errors.New("no contact columns recognized in CSV header")
 
 func (cfg Config) logf(format string, args ...interface{}) {
 	if cfg.Stderr != nil {
@@ -53,15 +71,32 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 
 	headers := make([]string, len(rawHeaders))
 	for i, h := range rawHeaders {
-		headers[i] = strings.TrimSpace(h)
+		headers[i] = strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))
+	}
+
+	for h, f := range cfg.HeaderMapping {
+		if !knownFields[f] {
+			return nil, fmt.Errorf("invalid field %q for column %q: use one of name, given_name, middle_name, family_name, phone, email, org, ignore", f, h)
+		}
 	}
 
 	mapping := buildHeaderMapping(headers, cfg.HeaderMapping)
+	if len(mapping) == 0 {
+		return nil, fmt.Errorf("%w (%s)", ErrNoRecognizedColumns, strings.Join(headers, ", "))
+	}
 
 	if cfg.Verbose {
 		cfg.logf("Detected header mapping:")
-		for h, f := range mapping {
-			cfg.logf("  %q -> %s", h, f)
+		var ignored []string
+		for _, h := range headers {
+			if f, ok := mapping[h]; ok {
+				cfg.logf("  %q -> %s", h, f)
+			} else {
+				ignored = append(ignored, fmt.Sprintf("%q", h))
+			}
+		}
+		if len(ignored) > 0 {
+			cfg.logf("Ignored columns: %s", strings.Join(ignored, ", "))
 		}
 	}
 
@@ -74,6 +109,12 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 			break
 		}
 		if err != nil {
+			// Only malformed CSV is recoverable; an I/O error repeats on every
+			// Read and would loop forever.
+			var perr *csv.ParseError
+			if !errors.As(err, &perr) {
+				return nil, fmt.Errorf("reading CSV: %w", err)
+			}
 			result.Errors = append(result.Errors, model.ParseError{
 				Row:     line,
 				Message: fmt.Sprintf("read error: %v", err),
@@ -104,6 +145,14 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 func contactFromRow(row []string, headers []string, mapping map[string]string) (model.Contact, []model.ParseError) {
 	var c model.Contact
 	var errs []model.ParseError
+	seenPhones := make(map[string]bool)
+	seenEmails := make(map[string]bool)
+
+	setOnce := func(dst *string, val string) {
+		if *dst == "" {
+			*dst = val
+		}
+	}
 
 	for i, header := range headers {
 		if i >= len(row) {
@@ -121,18 +170,47 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 
 		switch field {
 		case FieldName:
-			if c.Name == "" {
-				c.Name = val
-			}
+			setOnce(&c.Name, val)
+		case FieldGivenName:
+			setOnce(&c.GivenName, val)
+		case FieldMiddleName:
+			setOnce(&c.MiddleName, val)
+		case FieldFamilyName:
+			setOnce(&c.FamilyName, val)
 		case FieldPhone:
-			c.Phones = append(c.Phones, val)
-		case FieldEmail:
-			c.Emails = append(c.Emails, val)
-		case FieldOrg:
-			if c.Organization == "" {
-				c.Organization = val
+			for _, p := range splitMultiValue(val) {
+				// Word-matched columns such as "Phone verified" hold answers, not numbers.
+				if len(normalize.PhoneDigits(p)) < 3 {
+					errs = append(errs, rejectedValue(header, p, "a phone number"))
+					continue
+				}
+				key := normalize.PhoneDigits(p)
+				if key == "" {
+					key = p
+				}
+				if !seenPhones[key] {
+					seenPhones[key] = true
+					c.Phones = append(c.Phones, p)
+				}
 			}
+		case FieldEmail:
+			for _, e := range splitMultiValue(val) {
+				if !strings.Contains(e, "@") {
+					errs = append(errs, rejectedValue(header, e, "an email address"))
+					continue
+				}
+				if key := strings.ToLower(e); !seenEmails[key] {
+					seenEmails[key] = true
+					c.Emails = append(c.Emails, e)
+				}
+			}
+		case FieldOrg:
+			setOnce(&c.Organization, val)
 		}
+	}
+
+	if c.Name == "" {
+		c.Name = joinNonEmpty(c.GivenName, c.MiddleName, c.FamilyName)
 	}
 
 	if c.Name == "" && len(c.Phones) == 0 && len(c.Emails) == 0 && c.Organization == "" {
@@ -145,19 +223,50 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 	return c, errs
 }
 
+func rejectedValue(header, val, kind string) model.ParseError {
+	return model.ParseError{
+		Field:   header,
+		Message: fmt.Sprintf("%q is not %s (column %q), ignored", val, kind, header),
+	}
+}
+
+// splitMultiValue splits Google Contacts cells that hold several values
+// separated by " ::: ".
+func splitMultiValue(val string) []string {
+	var out []string
+	for _, part := range strings.Split(val, ":::") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func joinNonEmpty(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, " ")
+}
+
 func buildHeaderMapping(headers []string, override map[string]string) map[string]string {
 	mapping := make(map[string]string, len(headers))
 
 	normalizedOverride := make(map[string]string, len(override))
 	for k, v := range override {
-		normalizedOverride[strings.ToLower(k)] = v
+		normalizedOverride[strings.ToLower(strings.TrimSpace(k))] = v
 	}
 
 	for _, header := range headers {
 		lower := strings.ToLower(header)
 
 		if field, ok := normalizedOverride[lower]; ok {
-			mapping[header] = field
+			if field != FieldIgnore {
+				mapping[header] = field
+			}
 			continue
 		}
 
@@ -169,48 +278,122 @@ func buildHeaderMapping(headers []string, override map[string]string) map[string
 	return mapping
 }
 
+var (
+	headerWordRe  = regexp.MustCompile(`\p{L}+`)
+	headerEmailRe = regexp.MustCompile(`\be[\s_\-]?mail`)
+)
+
+// Columns that describe a value (its label or type) or belong to someone
+// other than the contact. Exports from Google and Outlook place these next to
+// the real value columns.
+var skipHeaderWords = wordSet(
+	"label", "type", "title", "prefix", "suffix", "phonetic", "yomi", "nickname",
+	"fax", "pager", "department", "assistant", "manager", "spouse", "emergency",
+	"parent", "guardian", "father", "mother",
+)
+
+var (
+	emailWords      = wordSet("email", "emails")
+	phoneWords      = wordSet("phone", "phones", "telephone", "tel", "mobile", "cell", "cellphone", "whatsapp")
+	emailJoined     = wordSet("mail", "mailid", "mailaddress")
+	phoneJoined     = wordSet("phonenumber", "phoneno", "phno", "mobilenumber", "mobileno", "mobno", "contactnumber", "contactno", "cellnumber", "cellno", "telno")
+	orgWords        = wordSet("org", "organization", "organisation", "company", "employer", "affiliation", "college", "university", "institution")
+	givenWords      = wordSet("first", "given")
+	middleWords     = wordSet("middle", "additional")
+	familyWords     = wordSet("last", "family", "surname")
+	nameWord        = wordSet("name")
+	nameJoined      = wordSet("fullname", "displayname", "contactname")
+	givenJoined     = wordSet("firstname", "givenname", "fname")
+	middleJoined    = wordSet("middlename", "additionalname")
+	familyJoined    = wordSet("lastname", "familyname", "lname")
+	fullNameContext = wordSet(
+		"name", "full", "display", "contact", "your", "student", "participant", "member",
+		"person", "candidate", "applicant", "attendee", "of", "the", "s",
+	)
+)
+
+func wordSet(words ...string) map[string]bool {
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[w] = true
+	}
+	return m
+}
+
+// detectField maps a CSV header to a contact field by its words, so variants
+// like "E-mail 2 Address", "Mobile Phone" or "Phone 1 - Value" are recognized.
 func detectField(header string) string {
-	normalized := normalizeHeader(header)
-	if normalized == "" {
+	h := headerEmailRe.ReplaceAllString(strings.ToLower(header), "email")
+	words := headerWordRe.FindAllString(h, -1)
+	if len(words) == 0 {
 		return ""
+	}
+	joined := strings.Join(words, "")
+
+	has := func(set map[string]bool) bool {
+		for _, w := range words {
+			if set[w] {
+				return true
+			}
+		}
+		return false
+	}
+	only := func(set map[string]bool) bool {
+		for _, w := range words {
+			if !set[w] {
+				return false
+			}
+		}
+		return true
+	}
+	hasName := has(nameWord)
+	namePart := func(set, joinedSet map[string]bool) bool {
+		return joinedSet[joined] || (has(set) && (hasName || len(words) == 1))
 	}
 
 	switch {
-	case regexp.MustCompile(`^(name|fullname|full_name|full-name|contactname|displayname)$`).MatchString(normalized):
-		return FieldName
-	case regexp.MustCompile(`^(first_name|given_name|firstname|givenname)$`).MatchString(normalized):
-		return FieldName
-	case regexp.MustCompile(`^(last_name|family_name|lastname|familyname|surname)$`).MatchString(normalized):
-		return FieldName
-
-	case regexp.MustCompile(`^phone\d*$`).MatchString(normalized):
-		return FieldPhone
-	case regexp.MustCompile(`^(telephone|tel|mobile|cell|phone.number|phonenumber|contactnumber)$`).MatchString(normalized):
-		return FieldPhone
-	case regexp.MustCompile(`^phone_\d+$`).MatchString(normalized):
-		return FieldPhone
-
-	case regexp.MustCompile(`^email\d*$`).MatchString(normalized):
+	case has(skipHeaderWords):
+		return ""
+	case (has(emailWords) || strings.HasPrefix(joined, "email") || emailJoined[joined]) && !hasName:
 		return FieldEmail
-	case regexp.MustCompile(`^(e_mail|email_address|emailaddress|mail)$`).MatchString(normalized):
-		return FieldEmail
-	case regexp.MustCompile(`^email_\d+$`).MatchString(normalized):
-		return FieldEmail
-
-	case regexp.MustCompile(`^(org|organization|organisation|company|employer|affiliation)$`).MatchString(normalized):
+	case has(phoneWords) || phoneJoined[joined]:
+		return FieldPhone
+	case has(orgWords):
 		return FieldOrg
+	case namePart(givenWords, givenJoined):
+		return FieldGivenName
+	case namePart(middleWords, middleJoined):
+		return FieldMiddleName
+	case namePart(familyWords, familyJoined):
+		return FieldFamilyName
+	case nameJoined[joined] || (hasName && only(fullNameContext)):
+		return FieldName
 	}
 
 	return ""
 }
 
-func normalizeHeader(header string) string {
-	re := regexp.MustCompile(`[ _\-]+`)
-	return re.ReplaceAllString(header, "_")
+// VCFOptions controls how a contact is rendered as a vCard.
+type VCFOptions struct {
+	// DefaultCountry is the calling code (e.g. "+91") for phone numbers written
+	// without one. When empty, such numbers are written as typed.
+	DefaultCountry string
 }
 
 func ContactToVCF(c model.Contact) string {
+	return ContactToVCFWithOptions(c, VCFOptions{})
+}
+
+func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
+	vcf, _ := renderVCard(c, opts)
+	return vcf
+}
+
+// renderVCard returns the vCard and how many phone numbers had no known
+// country and were written as typed.
+func renderVCard(c model.Contact, opts VCFOptions) (string, int) {
 	var b strings.Builder
+	localPhones := 0
 
 	b.WriteString("BEGIN:VCARD\r\n")
 	b.WriteString("VERSION:4.0\r\n")
@@ -218,67 +401,129 @@ func ContactToVCF(c model.Contact) string {
 
 	fn := c.Name
 	if fn == "" {
+		fn = joinNonEmpty(c.GivenName, c.MiddleName, c.FamilyName)
+	}
+	if fn == "" {
 		fn = "Unknown"
 	}
 	b.WriteString(fmt.Sprintf("FN:%s\r\n", escapeVCF(fn)))
-	b.WriteString(fmt.Sprintf("N:%s\r\n", structuredName(c.Name)))
+	b.WriteString(fmt.Sprintf("N:%s\r\n", structuredName(c)))
 
 	if c.Organization != "" {
 		b.WriteString(fmt.Sprintf("ORG:%s\r\n", escapeVCF(c.Organization)))
 	}
 
 	for _, phone := range c.Phones {
-		normalized := normalize.NormalizePhone(phone, normalize.PhoneConfig{})
-		tel := normalized.Normalized
-		if normalized.Valid && tel != "" {
-			if !strings.HasPrefix(tel, "+") {
-				tel = "+" + tel
-			}
+		if tel, ok := internationalPhone(phone, opts.DefaultCountry); ok {
 			b.WriteString(fmt.Sprintf("TEL;VALUE=uri:tel:%s\r\n", tel))
-		} else if cleaned := normalize.PhoneDigits(phone); cleaned != "" {
-			b.WriteString(fmt.Sprintf("TEL;VALUE=uri:tel:+%s\r\n", cleaned))
 		} else {
-			b.WriteString(fmt.Sprintf("TEL:%s\r\n", escapeVCF(phone)))
+			localPhones++
+			b.WriteString(fmt.Sprintf("TEL;VALUE=text:%s\r\n", escapeVCF(strings.TrimSpace(phone))))
 		}
 	}
 
+	// Emails are written as given; use NormalizeContact to normalize them first.
 	for _, email := range c.Emails {
-		normalized := normalize.NormalizeEmail(email, normalize.EmailConfig{
-			StripAliases:     true,
-			StrictValidation: false,
-		})
-		if normalized.Valid && normalized.Normalized != "" {
-			b.WriteString(fmt.Sprintf("EMAIL:%s\r\n", normalized.Normalized))
-		} else {
+		if email = strings.TrimSpace(email); email != "" {
 			b.WriteString(fmt.Sprintf("EMAIL:%s\r\n", escapeVCF(email)))
 		}
 	}
 
 	b.WriteString("END:VCARD\r\n")
-	return b.String()
+	return b.String(), localPhones
 }
 
-func structuredName(fullName string) string {
-	fullName = strings.TrimSpace(fullName)
+// internationalPhone returns the E.164 form of phone when its country is known.
+func internationalPhone(phone, defaultCountry string) (string, bool) {
+	n := normalize.NormalizePhone(phone, normalize.PhoneConfig{DefaultCountry: defaultCountry})
+	return n.Normalized, n.Valid && strings.HasPrefix(n.Normalized, "+")
+}
+
+// writeVCards writes contacts as vCards and returns how many phone numbers had
+// no known country and were written as typed.
+func writeVCards(w io.Writer, contacts []model.Contact, opts VCFOptions) (localPhones int, err error) {
+	for _, c := range contacts {
+		vcf, n := renderVCard(c, opts)
+		localPhones += n
+		if _, err := io.WriteString(w, vcf); err != nil {
+			return localPhones, fmt.Errorf("writing VCF: %w", err)
+		}
+	}
+	return localPhones, nil
+}
+
+// withInternationalPhones returns copies of contacts with every phone whose
+// country is known rewritten to E.164, so dedupe sees "+91 98765 43210" and
+// "98765 43210" as the same number.
+func withInternationalPhones(contacts []model.Contact, defaultCountry string) []model.Contact {
+	out := make([]model.Contact, len(contacts))
+	for i, c := range contacts {
+		phones := make([]string, len(c.Phones))
+		for j, p := range c.Phones {
+			if tel, ok := internationalPhone(p, defaultCountry); ok {
+				p = tel
+			}
+			phones[j] = p
+		}
+		c.Phones = phones
+		out[i] = c
+	}
+	return out
+}
+
+func validateCountry(country string) error {
+	if country == "" {
+		return nil
+	}
+	if _, ok := normalize.NormalizeCountryCode(country); !ok {
+		return fmt.Errorf("invalid default country %q: use a calling code such as +91 or +1", country)
+	}
+	return nil
+}
+
+var (
+	nameSuffixes = wordSet("jr", "sr", "ii", "iii", "iv", "phd", "md", "esq")
+	companyWords = wordSet("inc", "ltd", "llc", "llp", "corp", "co", "plc", "gmbh")
+)
+
+// structuredName builds the vCard N value (family;given;additional;prefix;suffix).
+// Separate name columns win; otherwise Name is split, understanding the
+// "Family, Given" and "Given Family, Jr." forms.
+func structuredName(c model.Contact) string {
+	if c.GivenName != "" || c.MiddleName != "" || c.FamilyName != "" {
+		return nValue(c.FamilyName, c.GivenName, c.MiddleName, "")
+	}
+
+	fullName := strings.TrimSpace(c.Name)
 	if fullName == "" {
 		return ";;;;"
 	}
 
+	var suffix string
+	if before, after, ok := strings.Cut(fullName, ","); ok && !strings.Contains(after, ",") {
+		before, after = strings.TrimSpace(before), strings.TrimSpace(after)
+		word := strings.ToLower(strings.Trim(after, "."))
+		switch {
+		case before == "" || after == "":
+		case companyWords[word]:
+			return nValue("", fullName, "", "")
+		case nameSuffixes[word]:
+			fullName, suffix = before, after
+		default:
+			return nValue(before, after, "", "")
+		}
+	}
+
 	parts := strings.Fields(fullName)
 	if len(parts) == 1 {
-		return fmt.Sprintf(";%s;;;", escapeVCF(parts[0]))
+		return nValue("", parts[0], "", suffix)
 	}
+	middle := strings.Join(parts[1:len(parts)-1], " ")
+	return nValue(parts[len(parts)-1], parts[0], middle, suffix)
+}
 
-	given := escapeVCF(parts[0])
-	family := escapeVCF(parts[len(parts)-1])
-
-	var middle string
-	if len(parts) > 2 {
-		middleParts := parts[1 : len(parts)-1]
-		middle = escapeVCF(strings.Join(middleParts, " "))
-	}
-
-	return fmt.Sprintf("%s;%s;%s;;", family, given, middle)
+func nValue(family, given, middle, suffix string) string {
+	return fmt.Sprintf("%s;%s;%s;;%s", escapeVCF(family), escapeVCF(given), escapeVCF(middle), escapeVCF(suffix))
 }
 
 func escapeVCF(s string) string {
@@ -292,6 +537,10 @@ func escapeVCF(s string) string {
 }
 
 func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, error) {
+	if err := validateCountry(cfg.DefaultCountry); err != nil {
+		return nil, err
+	}
+
 	result, err := ParseCSV(r, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parsing CSV: %w", err)
@@ -304,39 +553,18 @@ func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, 
 	contacts := result.Contacts
 	if cfg.Deduplicate && len(contacts) > 0 {
 		cfg.logf("Deduplicating %d contacts...", len(contacts))
-		dc := dedupe.DefaultConfig()
-		dedupeResult := dedupe.Deduplicate(contacts, dc)
-
-		// Preserve all singletons, replace duplicate clusters with their merged
-		// representative. Avoid heuristic "name+org" identity keys, which can
-		// drop distinct contacts.
-		var final []model.Contact
-		mergeIdx := 0
-		for _, cluster := range dedupeResult.Clusters {
-			if len(cluster) <= 1 {
-				if len(cluster) == 1 {
-					final = append(final, cluster[0])
-				}
-				continue
-			}
-			if mergeIdx < len(dedupeResult.Merged) {
-				final = append(final, dedupeResult.Merged[mergeIdx].Contact)
-				mergeIdx++
-				continue
-			}
-			// Fallback: should not happen, but keep one contact rather than drop.
-			final = append(final, cluster[0])
+		if cfg.DefaultCountry != "" {
+			contacts = withInternationalPhones(contacts, cfg.DefaultCountry)
 		}
-		contacts = final
+		contacts = dedupe.Representatives(dedupe.Deduplicate(contacts, dedupe.DefaultConfig()))
 
 		cfg.logf("After deduplication: %d contacts (removed %d duplicates)",
 			len(contacts), len(result.Contacts)-len(contacts))
 	}
 
-	for _, c := range contacts {
-		if _, err := io.WriteString(w, ContactToVCF(c)); err != nil {
-			return nil, fmt.Errorf("writing VCF: %w", err)
-		}
+	localPhones, err := writeVCards(w, contacts, VCFOptions{DefaultCountry: cfg.DefaultCountry})
+	if err != nil {
+		return nil, err
 	}
 
 	return &ConversionSummary{
@@ -346,6 +574,7 @@ func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, 
 		Deduplicated:      cfg.Deduplicate,
 		InputContacts:     len(result.Contacts),
 		DuplicatesRemoved: len(result.Contacts) - len(contacts),
+		LocalPhones:       localPhones,
 	}, nil
 }
 
@@ -356,4 +585,7 @@ type ConversionSummary struct {
 	Deduplicated      bool
 	InputContacts     int
 	DuplicatesRemoved int
+	// LocalPhones counts phone numbers written as typed because their country
+	// was unknown. Set DefaultCountry to convert them to international format.
+	LocalPhones int
 }
