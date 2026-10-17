@@ -481,6 +481,11 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 			return runDoneMsg{err: fmt.Errorf("input path is required")}
 		}
 
+		country, err := defaultCountry()
+		if err != nil {
+			return runDoneMsg{err: err}
+		}
+
 		inFile, err := os.Open(in)
 		if err != nil {
 			return runDoneMsg{err: err}
@@ -510,7 +515,7 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 
 		switch flow {
 		case flowNormalizeCSV, flowNormalizeJSON, flowNormalizeVCF, flowNormalizeDedupeCSV, flowNormalizeDedupeVCF:
-			contacts, err := parseAndNormalizeRows(inFile, llm)
+			contacts, err := parseAndNormalizeRows(inFile, llm, country)
 			if err != nil {
 				return runDoneMsg{err: err}
 			}
@@ -525,16 +530,17 @@ func (m tuiModel) runWorkflowCmd() tea.Cmd {
 			case flowNormalizeJSON:
 				return runDoneMsg{err: writeJSON(w, contacts)}
 			case flowNormalizeVCF, flowNormalizeDedupeVCF:
-				return runDoneMsg{err: writeVCF(w, contacts, verbose, m.errOut)}
+				return runDoneMsg{err: writeVCF(w, contacts, country)}
 			default:
 				return runDoneMsg{err: writeCSV(w, contacts)}
 			}
 
 		case flowConvertVCF, flowConvertDedupeVCF:
 			_, err := convert.ConvertCSVToVCF(inFile, w, convert.Config{
-				Deduplicate: flow == flowConvertDedupeVCF,
-				Verbose:     verbose,
-				Stderr:      m.errOut,
+				DefaultCountry: country,
+				Deduplicate:    flow == flowConvertDedupeVCF,
+				Verbose:        verbose,
+				Stderr:         m.errOut,
 			})
 			return runDoneMsg{err: err}
 
@@ -568,13 +574,14 @@ type normalizedContact struct {
 	Org    string   `json:"org"`
 }
 
-func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM) ([]normalizedContact, error) {
+func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM, country string) ([]normalizedContact, error) {
 	result, err := convert.ParseCSV(r, convert.Config{})
 	if err != nil {
 		return nil, err
 	}
 
 	cfg := convert.NormalizeVCFConfig{
+		Phone: normalize.PhoneConfig{DefaultCountry: country},
 		Email: normalize.EmailConfig{StripAliases: true},
 	}
 	if llm != nil {
@@ -663,28 +670,12 @@ func writeCSV(w io.Writer, contacts []normalizedContact) error {
 	return writer.Error()
 }
 
-func writeVCF(w io.Writer, contacts []normalizedContact, verbose bool, errOut io.Writer) error {
-	pr, pw := io.Pipe()
-
-	go func() {
-		cw := csv.NewWriter(pw)
-		_ = cw.Write([]string{"name", "phone", "email", "org"})
-		for _, c := range contacts {
-			_ = cw.Write([]string{
-				c.Name,
-				strings.Join(c.Phones, "; "),
-				strings.Join(c.Emails, "; "),
-				c.Org,
-			})
+func writeVCF(w io.Writer, contacts []normalizedContact, country string) error {
+	for _, c := range toModelContacts(contacts) {
+		vcf := convert.ContactToVCFWithOptions(c, convert.VCFOptions{DefaultCountry: country})
+		if _, err := io.WriteString(w, vcf); err != nil {
+			return err
 		}
-		cw.Flush()
-		_ = pw.CloseWithError(cw.Error())
-	}()
-
-	_, err := convert.ConvertCSVToVCF(pr, w, convert.Config{
-		Deduplicate: false,
-		Verbose:     verbose,
-		Stderr:      errOut,
-	})
-	return err
+	}
+	return nil
 }

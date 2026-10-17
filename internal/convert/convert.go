@@ -15,6 +15,8 @@ import (
 )
 
 type Config struct {
+	// DefaultCountry is the calling code (e.g. "+91") for phone numbers written
+	// without one. When empty, such numbers are written to the vCard as typed.
 	DefaultCountry string
 	HeaderMapping  map[string]string
 	Deduplicate    bool
@@ -349,7 +351,18 @@ func detectField(header string) string {
 	return ""
 }
 
+// VCFOptions controls how a contact is rendered as a vCard.
+type VCFOptions struct {
+	// DefaultCountry is the calling code (e.g. "+91") for phone numbers written
+	// without one. When empty, such numbers are written as typed.
+	DefaultCountry string
+}
+
 func ContactToVCF(c model.Contact) string {
+	return ContactToVCFWithOptions(c, VCFOptions{})
+}
+
+func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
 	var b strings.Builder
 
 	b.WriteString("BEGIN:VCARD\r\n")
@@ -368,17 +381,10 @@ func ContactToVCF(c model.Contact) string {
 	}
 
 	for _, phone := range c.Phones {
-		normalized := normalize.NormalizePhone(phone, normalize.PhoneConfig{})
-		tel := normalized.Normalized
-		if normalized.Valid && tel != "" {
-			if !strings.HasPrefix(tel, "+") {
-				tel = "+" + tel
-			}
+		if tel, ok := internationalPhone(phone, opts.DefaultCountry); ok {
 			b.WriteString(fmt.Sprintf("TEL;VALUE=uri:tel:%s\r\n", tel))
-		} else if cleaned := normalize.PhoneDigits(phone); cleaned != "" {
-			b.WriteString(fmt.Sprintf("TEL;VALUE=uri:tel:+%s\r\n", cleaned))
 		} else {
-			b.WriteString(fmt.Sprintf("TEL:%s\r\n", escapeVCF(phone)))
+			b.WriteString(fmt.Sprintf("TEL;VALUE=text:%s\r\n", escapeVCF(strings.TrimSpace(phone))))
 		}
 	}
 
@@ -396,6 +402,38 @@ func ContactToVCF(c model.Contact) string {
 
 	b.WriteString("END:VCARD\r\n")
 	return b.String()
+}
+
+// internationalPhone returns the E.164 form of phone when its country is known.
+func internationalPhone(phone, defaultCountry string) (string, bool) {
+	n := normalize.NormalizePhone(phone, normalize.PhoneConfig{DefaultCountry: defaultCountry})
+	return n.Normalized, n.Valid && strings.HasPrefix(n.Normalized, "+")
+}
+
+// writeVCards writes contacts as vCards and returns how many phone numbers had
+// no known country and were written as typed.
+func writeVCards(w io.Writer, contacts []model.Contact, opts VCFOptions) (localPhones int, err error) {
+	for _, c := range contacts {
+		for _, p := range c.Phones {
+			if _, ok := internationalPhone(p, opts.DefaultCountry); !ok {
+				localPhones++
+			}
+		}
+		if _, err := io.WriteString(w, ContactToVCFWithOptions(c, opts)); err != nil {
+			return localPhones, fmt.Errorf("writing VCF: %w", err)
+		}
+	}
+	return localPhones, nil
+}
+
+func validateCountry(country string) error {
+	if country == "" {
+		return nil
+	}
+	if _, ok := normalize.NormalizeCountryCode(country); !ok {
+		return fmt.Errorf("invalid default country %q: use a calling code such as +91 or +1", country)
+	}
+	return nil
 }
 
 func structuredName(fullName string) string {
@@ -432,6 +470,10 @@ func escapeVCF(s string) string {
 }
 
 func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, error) {
+	if err := validateCountry(cfg.DefaultCountry); err != nil {
+		return nil, err
+	}
+
 	result, err := ParseCSV(r, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parsing CSV: %w", err)
@@ -473,10 +515,9 @@ func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, 
 			len(contacts), len(result.Contacts)-len(contacts))
 	}
 
-	for _, c := range contacts {
-		if _, err := io.WriteString(w, ContactToVCF(c)); err != nil {
-			return nil, fmt.Errorf("writing VCF: %w", err)
-		}
+	localPhones, err := writeVCards(w, contacts, VCFOptions{DefaultCountry: cfg.DefaultCountry})
+	if err != nil {
+		return nil, err
 	}
 
 	return &ConversionSummary{
@@ -486,6 +527,7 @@ func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, 
 		Deduplicated:      cfg.Deduplicate,
 		InputContacts:     len(result.Contacts),
 		DuplicatesRemoved: len(result.Contacts) - len(contacts),
+		LocalPhones:       localPhones,
 	}, nil
 }
 
@@ -496,4 +538,7 @@ type ConversionSummary struct {
 	Deduplicated      bool
 	InputContacts     int
 	DuplicatesRemoved int
+	// LocalPhones counts phone numbers written as typed because their country
+	// was unknown. Set DefaultCountry to convert them to international format.
+	LocalPhones int
 }

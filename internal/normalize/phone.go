@@ -11,6 +11,10 @@ type PhoneConfig struct {
 	StrictValidation bool
 }
 
+// NormalizePhone converts a phone number to E.164 when its country is known:
+// either written with "+" or "00", or supplied via cfg.DefaultCountry. Numbers
+// without a known country are never given one; in non-strict mode they are
+// returned as plain digits with an empty Country.
 func NormalizePhone(raw string, cfg PhoneConfig) model.NormalizedPhone {
 	orig := raw
 	raw = strings.TrimSpace(raw)
@@ -18,18 +22,7 @@ func NormalizePhone(raw string, cfg PhoneConfig) model.NormalizedPhone {
 		return model.NormalizedPhone{Raw: orig, Valid: false}
 	}
 
-	hasPlus := strings.HasPrefix(raw, "+")
-	normalized, valid := normalizePhone(raw, cfg)
-
-	var country string
-	if valid {
-		if hasPlus {
-			country = extractCountryCode(normalized)
-		} else {
-			country = cfg.DefaultCountry
-		}
-	}
-
+	normalized, country, valid := normalizePhone(raw, cfg)
 	return model.NormalizedPhone{
 		Raw:        orig,
 		Normalized: normalized,
@@ -38,28 +31,84 @@ func NormalizePhone(raw string, cfg PhoneConfig) model.NormalizedPhone {
 	}
 }
 
-func normalizePhone(raw string, cfg PhoneConfig) (string, bool) {
-	hasPlus := strings.HasPrefix(raw, "+")
-	cleaned := PhoneDigits(raw)
-
-	if len(cleaned) < 10 || len(cleaned) > 15 {
+// NormalizeCountryCode returns the "+<digits>" form of a calling code given as
+// "+91" or "91", and whether it is a known code.
+func NormalizeCountryCode(s string) (string, bool) {
+	d := strings.TrimPrefix(strings.TrimSpace(s), "+")
+	if d == "" {
 		return "", false
 	}
-	if hasPlus {
-		return "+" + cleaned, true
+	for _, r := range d {
+		if r < '0' || r > '9' {
+			return "", false
+		}
 	}
-	if cfg.DefaultCountry != "" {
-		return cfg.DefaultCountry + cleaned, true
-	}
-	if cfg.StrictValidation {
-		return "", false
-	}
-	return cleaned, true
+	code, ok := countryCodes[d]
+	return code, ok
 }
 
-// PhoneDigits strips non-numeric characters and removes leading zeros.
-// Returns a comparable digit string suitable for deduplication lookups.
-func PhoneDigits(s string) string {
+// nationalLengths pins the national number length for countries where it is
+// fixed, so a mistyped number is rejected rather than prefixed.
+var nationalLengths = map[string]int{"+1": 10, "+91": 10}
+
+func normalizePhone(raw string, cfg PhoneConfig) (normalized, country string, valid bool) {
+	digits := allDigits(raw)
+
+	international := strings.HasPrefix(raw, "+")
+	if !international && strings.HasPrefix(digits, "00") {
+		international = true
+		digits = digits[2:]
+	}
+	if international {
+		if len(digits) < 8 || len(digits) > 15 || digits[0] == '0' {
+			return "", "", false
+		}
+		e164 := "+" + digits
+		return e164, extractCountryCode(e164), true
+	}
+
+	// A leading 0 is a national trunk prefix.
+	hasTrunk := strings.HasPrefix(digits, "0")
+	national := strings.TrimLeft(digits, "0")
+
+	if cc, ok := NormalizeCountryCode(cfg.DefaultCountry); ok {
+		if n, ok := nationalNumber(national, cc, hasTrunk); ok {
+			return cc + n, cc, true
+		}
+	}
+
+	if cfg.StrictValidation || len(national) < 7 || len(national) > 15 {
+		return "", "", false
+	}
+	return national, "", true
+}
+
+// nationalNumber validates a number written without a country code against cc,
+// dropping the country digits when they were typed without a "+".
+func nationalNumber(national, cc string, hasTrunk bool) (string, bool) {
+	ccDigits := cc[1:]
+	typedCC := !hasTrunk && strings.HasPrefix(national, ccDigits)
+
+	if want, fixed := nationalLengths[cc]; fixed {
+		switch {
+		case len(national) == want:
+			return national, true
+		case typedCC && len(national)-len(ccDigits) == want:
+			return national[len(ccDigits):], true
+		}
+		return "", false
+	}
+
+	if typedCC && len(national)-len(ccDigits) >= 9 {
+		national = national[len(ccDigits):]
+	}
+	if len(national) < 7 || len(ccDigits)+len(national) > 15 {
+		return "", false
+	}
+	return national, true
+}
+
+func allDigits(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -67,11 +116,13 @@ func PhoneDigits(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	digits := b.String()
-	if len(digits) > 0 && digits[0] == '0' {
-		digits = strings.TrimLeft(digits, "0")
-	}
-	return digits
+	return b.String()
+}
+
+// PhoneDigits strips non-numeric characters and removes leading zeros.
+// Returns a comparable digit string suitable for deduplication lookups.
+func PhoneDigits(s string) string {
+	return strings.TrimLeft(allDigits(s), "0")
 }
 
 func extractCountryCode(e164 string) string {

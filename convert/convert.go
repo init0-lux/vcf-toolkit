@@ -13,6 +13,7 @@ type Config = internal.Config
 type ParseResult = internal.ParseResult
 type ConversionSummary = internal.ConversionSummary
 type NormalizeVCFConfig = internal.NormalizeVCFConfig
+type VCFOptions = internal.VCFOptions
 
 const (
 	FieldName       = internal.FieldName
@@ -28,6 +29,7 @@ const (
 var ErrNoRecognizedColumns = internal.ErrNoRecognizedColumns
 
 var ContactToVCF = internal.ContactToVCF
+var ContactToVCFWithOptions = internal.ContactToVCFWithOptions
 
 func NormalizeContact(c Contact, cfg NormalizeVCFConfig) Contact {
 	return internal.NormalizeContact(c, cfg)

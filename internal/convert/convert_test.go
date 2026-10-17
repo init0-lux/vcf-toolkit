@@ -386,7 +386,9 @@ func TestContactToVCF_PhoneNormalization(t *testing.T) {
 		wantTel string
 	}{
 		{"US number with formatting", "+1 (555) 0100", "TEL;VALUE=uri:tel:+15550100"},
-		{"US number without plus", "15550100", "TEL;VALUE=uri:tel:+15550100"},
+		{"local number is kept as typed", "15550100", "TEL;VALUE=text:15550100\r\n"},
+		{"local number with formatting is kept as typed", "(212) 555-0101", "TEL;VALUE=text:(212) 555-0101\r\n"},
+		{"00 international prefix", "0044 20 7946 0958", "TEL;VALUE=uri:tel:+442079460958"},
 		{"Indian number", "+91 98765 43210", "TEL;VALUE=uri:tel:+919876543210"},
 		{"UK number", "+44 20 7946 0958", "TEL;VALUE=uri:tel:+442079460958"},
 	}
@@ -702,9 +704,12 @@ Charlie,Brown,charlie+spam@test.co,44 20 7946 0958,Tech Ltd
 	output := buf.String()
 	assert.Contains(t, output, "FN:Alice Johnson\r\n")
 	assert.Contains(t, output, "N:Johnson;Alice;;;")
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+12125550100")  // +1-212-555-0100 normalized
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+4155550199")   // (415) 555-0199 → digits + "+"
-	assert.Contains(t, output, "TEL;VALUE=uri:tel:+442079460958") // 44 20 7946 0958 → digits + "+"
+	assert.Contains(t, output, "TEL;VALUE=uri:tel:+12125550100") // +1-212-555-0100 normalized
+	// Numbers without a "+" are written as typed rather than given a guessed country.
+	assert.Contains(t, output, "TEL;VALUE=text:(415) 555-0199\r\n")
+	assert.Contains(t, output, "TEL;VALUE=text:44 20 7946 0958\r\n")
+	assert.NotContains(t, output, "tel:+4155550199")
+	assert.Equal(t, 2, result.LocalPhones)
 	assert.Contains(t, output, "EMAIL:alice.j@company.com")
 	assert.Contains(t, output, "EMAIL:bob.smith@example.org")
 	assert.Contains(t, output, "EMAIL:charlie@test.co") // plus-alias stripped
@@ -714,4 +719,33 @@ Charlie,Brown,charlie+spam@test.co,44 20 7946 0958,Tech Ltd
 
 	// Verify CRLF line endings
 	assert.Contains(t, output, "\r\n")
+}
+
+func TestContactToVCFWithOptions_DefaultCountry(t *testing.T) {
+	c := model.Contact{
+		Name:   "Test",
+		Phones: []string{"(212) 555-0101", "+44 20 7946 0958", "555-0199"},
+	}
+	vcf := ContactToVCFWithOptions(c, VCFOptions{DefaultCountry: "+1"})
+	assert.Contains(t, vcf, "TEL;VALUE=uri:tel:+12125550101\r\n")
+	assert.Contains(t, vcf, "TEL;VALUE=uri:tel:+442079460958\r\n")
+	// Too short for a US number: kept as typed instead of guessed.
+	assert.Contains(t, vcf, "TEL;VALUE=text:555-0199\r\n")
+}
+
+func TestConvertCSVToVCF_DefaultCountry(t *testing.T) {
+	input := "name,phone\nPriya,98765 43210\nRavi,+91 91234 56789\n"
+	var buf bytes.Buffer
+	result, err := ConvertCSVToVCF(strings.NewReader(input), &buf, Config{DefaultCountry: "+91"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.LocalPhones)
+	assert.Contains(t, buf.String(), "TEL;VALUE=uri:tel:+919876543210\r\n")
+	assert.Contains(t, buf.String(), "TEL;VALUE=uri:tel:+919123456789\r\n")
+}
+
+func TestConvertCSVToVCF_InvalidDefaultCountry(t *testing.T) {
+	input := "name,phone\nPriya,98765 43210\n"
+	_, err := ConvertCSVToVCF(strings.NewReader(input), &bytes.Buffer{}, Config{DefaultCountry: "IN"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"IN"`)
 }

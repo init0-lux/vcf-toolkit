@@ -24,6 +24,7 @@ Examples:
   vcf-toolkit convert contacts.csv --out contacts.vcf
   vcf-toolkit convert contacts.csv --out contacts.vcf --dedupe
   vcf-toolkit convert contacts.csv --verbose
+  vcf-toolkit convert registrations.csv --country +91
   vcf-toolkit convert export.csv --map "Primary Phone=phone"
 `,
 	Args: cobra.MaximumNArgs(1),
@@ -34,9 +35,15 @@ func init() {
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().BoolVarP(&dedupeFlag, "dedupe", "d", false, "deduplicate contacts during conversion")
 	addCSVFlags(convertCmd)
+	addCountryFlag(convertCmd)
 }
 
 func runConvert(cmd *cobra.Command, args []string) error {
+	country, err := resolveCountry()
+	if err != nil {
+		return err
+	}
+
 	r, err := openInput(args)
 	if err != nil {
 		return err
@@ -50,10 +57,11 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	defer w.Close()
 
 	summary, err := convert.ConvertCSVToVCF(r, w, convert.Config{
-		HeaderMapping: headerMap,
-		Deduplicate:   dedupeFlag,
-		Verbose:       verbose,
-		Stderr:        cmd.ErrOrStderr(),
+		DefaultCountry: country,
+		HeaderMapping:  headerMap,
+		Deduplicate:    dedupeFlag,
+		Verbose:        verbose,
+		Stderr:         cmd.ErrOrStderr(),
 	})
 	if err != nil {
 		return err
@@ -62,6 +70,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if verbose {
 		logSummary(cmd, summary)
 	}
+	warnLocalPhones(cmd, summary.LocalPhones)
 	return nil
 }
 

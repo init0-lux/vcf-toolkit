@@ -36,6 +36,11 @@ func (cfg NormalizeVCFConfig) logf(format string, args ...interface{}) {
 // NormalizeCSVToVCF parses CSV contacts, normalizes their fields, optionally
 // deduplicates, and writes vCard 4.0 output.
 func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*ConversionSummary, error) {
+	country := cfg.country()
+	if err := validateCountry(country); err != nil {
+		return nil, err
+	}
+
 	parseCfg := Config{
 		DefaultCountry: cfg.DefaultCountry,
 		HeaderMapping:  cfg.HeaderMapping,
@@ -80,10 +85,9 @@ func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*Conve
 			len(contacts), len(result.Contacts)-len(contacts))
 	}
 
-	for _, c := range contacts {
-		if _, err := io.WriteString(w, ContactToVCF(c)); err != nil {
-			return nil, fmt.Errorf("writing VCF: %w", err)
-		}
+	localPhones, err := writeVCards(w, contacts, VCFOptions{DefaultCountry: country})
+	if err != nil {
+		return nil, err
 	}
 
 	return &ConversionSummary{
@@ -93,7 +97,16 @@ func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*Conve
 		Deduplicated:      cfg.Deduplicate,
 		InputContacts:     len(result.Contacts),
 		DuplicatesRemoved: len(result.Contacts) - len(contacts),
+		LocalPhones:       localPhones,
 	}, nil
+}
+
+// country returns the default calling code, preferring Phone.DefaultCountry.
+func (cfg NormalizeVCFConfig) country() string {
+	if cfg.Phone.DefaultCountry != "" {
+		return cfg.Phone.DefaultCountry
+	}
+	return cfg.DefaultCountry
 }
 
 // NormalizeContact applies the name, phone and email normalizers from cfg to a
@@ -113,9 +126,11 @@ func NormalizeContact(c model.Contact, cfg NormalizeVCFConfig) model.Contact {
 	}
 
 	// Phone normalization.
+	phoneCfg := cfg.Phone
+	phoneCfg.DefaultCountry = cfg.country()
 	out.Phones = nil
 	for _, p := range c.Phones {
-		np := normalize.NormalizePhone(p, cfg.Phone)
+		np := normalize.NormalizePhone(p, phoneCfg)
 		if np.Valid && np.Normalized != "" {
 			out.Phones = append(out.Phones, np.Normalized)
 		} else if strings.TrimSpace(p) != "" {

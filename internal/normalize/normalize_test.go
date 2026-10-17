@@ -263,3 +263,75 @@ func TestNormalizeEmail(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizePhone_CountryHandling(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		country string
+		strict  bool
+		want    string
+		valid   bool
+		cc      string
+	}{
+		// Without a default country a local number never gains a "+".
+		{"local US number, no country", "(212) 555-0101", "", false, "2125550101", true, ""},
+		{"local Indian number, no country", "98765 43210", "", false, "9876543210", true, ""},
+		{"local number, no country, strict", "(212) 555-0101", "", true, "", false, ""},
+		{"too short, no country", "555-01", "", false, "", false, ""},
+
+		{"US local with +1", "(212) 555-0101", "+1", true, "+12125550101", true, "+1"},
+		{"US with country digits but no plus", "1 212 555 0101", "+1", true, "+12125550101", true, "+1"},
+		{"US 7-digit with +1 is rejected", "555-0199", "+1", true, "", false, ""},
+		{"US 7-digit with +1, non-strict keeps digits", "555-0199", "+1", false, "5550199", true, ""},
+		{"country code without plus accepted", "(212) 555-0101", "1", true, "+12125550101", true, "+1"},
+
+		{"Indian local with +91", "98765 43210", "+91", true, "+919876543210", true, "+91"},
+		{"Indian with 91 but no plus", "919876543210", "+91", true, "+919876543210", true, "+91"},
+		{"Indian with trunk 0", "098765 43210", "+91", true, "+919876543210", true, "+91"},
+
+		{"UK national with trunk 0", "020 7946 0958", "+44", true, "+442079460958", true, "+44"},
+		{"UK with 44 but no plus", "44 20 7946 0958", "+44", true, "+442079460958", true, "+44"},
+		{"French national", "06 12 34 56 78", "+33", true, "+33612345678", true, "+33"},
+		// A trunk 0 marks a national number, so a leading 49 is an area code.
+		{"German area code starting with 49", "0491 12345678", "+49", true, "+4949112345678", true, "+49"},
+
+		{"00 international prefix", "0044 20 7946 0958", "+91", true, "+442079460958", true, "+44"},
+		{"00 international prefix, no country", "0044 20 7946 0958", "", false, "+442079460958", true, "+44"},
+		{"unknown default country is ignored", "(212) 555-0101", "+999", false, "2125550101", true, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizePhone(tc.raw, PhoneConfig{DefaultCountry: tc.country, StrictValidation: tc.strict})
+			want := model.NormalizedPhone{Raw: tc.raw, Normalized: tc.want, Valid: tc.valid, Country: tc.cc}
+			if got != want {
+				t.Errorf("NormalizePhone(%q, %q) =\n  %+v\nwant:\n  %+v", tc.raw, tc.country, got, want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCountryCode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"+91", "+91", true},
+		{"91", "+91", true},
+		{" +1 ", "+1", true},
+		{"+44", "+44", true},
+		{"+212", "+212", true},
+		{"IN", "", false},
+		{"+999", "", false},
+		{"+9a", "", false},
+		{"", "", false},
+	}
+	for _, tc := range tests {
+		got, ok := NormalizeCountryCode(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("NormalizeCountryCode(%q) = %q, %v; want %q, %v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}

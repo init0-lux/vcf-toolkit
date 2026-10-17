@@ -24,6 +24,7 @@ Examples:
   cat contacts.csv | vcf-toolkit normalize
   vcf-toolkit normalize contacts.csv --out clean.csv
   vcf-toolkit normalize contacts.csv --json
+  vcf-toolkit normalize contacts.csv --country +91
 `,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runNormalize,
@@ -33,9 +34,15 @@ func init() {
 	rootCmd.AddCommand(normalizeCmd)
 	normalizeCmd.Flags().BoolVarP(&jsonOutput, "json", "j", false, "output as JSON")
 	addCSVFlags(normalizeCmd)
+	addCountryFlag(normalizeCmd)
 }
 
 func runNormalize(cmd *cobra.Command, args []string) error {
+	country, err := resolveCountry()
+	if err != nil {
+		return err
+	}
+
 	r, err := openInput(args)
 	if err != nil {
 		return err
@@ -54,10 +61,17 @@ func runNormalize(cmd *cobra.Command, args []string) error {
 	}
 
 	var contacts []normalizedContact
+	localPhones := 0
 	for _, c := range result.Contacts {
 		n := convert.NormalizeContact(c, convert.NormalizeVCFConfig{
+			Phone: normalize.PhoneConfig{DefaultCountry: country},
 			Email: normalize.EmailConfig{StripAliases: true},
 		})
+		for _, p := range n.Phones {
+			if !strings.HasPrefix(p, "+") {
+				localPhones++
+			}
+		}
 		contacts = append(contacts, normalizedContact{
 			Name:   n.Name,
 			Phones: n.Phones,
@@ -66,6 +80,7 @@ func runNormalize(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	warnLocalPhones(cmd, localPhones)
 	if jsonOutput {
 		return writeJSON(w, contacts)
 	}

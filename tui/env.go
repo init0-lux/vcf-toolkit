@@ -3,8 +3,11 @@ package tui
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+
+	"github.com/init0-lux/vcf-toolkit/internal/normalize"
 )
 
 type envConfig struct {
@@ -12,6 +15,20 @@ type envConfig struct {
 	LLMAuthHeader string
 	LLMAPIKey     string
 	LLMBodyTmpl   string
+}
+
+// defaultCountry returns the calling code from VCF_TOOLKIT_COUNTRY (e.g. +91)
+// used for phone numbers written without one.
+func defaultCountry() (string, error) {
+	v := strings.TrimSpace(os.Getenv("VCF_TOOLKIT_COUNTRY"))
+	if v == "" {
+		return "", nil
+	}
+	cc, ok := normalize.NormalizeCountryCode(v)
+	if !ok {
+		return "", fmt.Errorf("invalid VCF_TOOLKIT_COUNTRY %q: use a calling code such as +91 or +1", v)
+	}
+	return cc, nil
 }
 
 func loadDotEnv(path string) (envConfig, error) {
