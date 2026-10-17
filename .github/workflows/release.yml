@@ -43,6 +43,11 @@ jobs:
           node-version: "20.x"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Verify npm package contents
+        run: |
+          cd npm
+          npm pack --dry-run 2>&1 | grep 'bin/vcf-toolkit.js'
+
       - name: Publish to NPM
         run: |
           cd npm

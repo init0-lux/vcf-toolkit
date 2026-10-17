@@ -3,5 +3,6 @@
 dist/
 
 .worktrees
-bin/
+/bin/
+npm/bin/*/
 node_modules/
