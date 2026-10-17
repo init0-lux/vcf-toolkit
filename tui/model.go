@@ -614,30 +614,14 @@ func toModelContacts(in []normalizedContact) []model.Contact {
 }
 
 func fromMergedContacts(result model.DedupeResult) []normalizedContact {
-	if len(result.Merged) == 0 {
-		var out []normalizedContact
-		for _, cl := range result.Clusters {
-			if len(cl) != 1 {
-				continue
-			}
-			c := cl[0]
-			out = append(out, normalizedContact{
-				Name:   c.Name,
-				Phones: append([]string(nil), c.Phones...),
-				Emails: append([]string(nil), c.Emails...),
-				Org:    c.Organization,
-			})
-		}
-		return out
-	}
-
-	out := make([]normalizedContact, 0, len(result.Merged))
-	for _, mc := range result.Merged {
+	reps := dedupe.Representatives(result)
+	out := make([]normalizedContact, 0, len(reps))
+	for _, c := range reps {
 		out = append(out, normalizedContact{
-			Name:   mc.Contact.Name,
-			Phones: append([]string(nil), mc.Contact.Phones...),
-			Emails: append([]string(nil), mc.Contact.Emails...),
-			Org:    mc.Contact.Organization,
+			Name:   c.Name,
+			Phones: append([]string(nil), c.Phones...),
+			Emails: append([]string(nil), c.Emails...),
+			Org:    c.Organization,
 		})
 	}
 	return out

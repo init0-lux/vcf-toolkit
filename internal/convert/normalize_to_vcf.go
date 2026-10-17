@@ -61,26 +61,7 @@ func NormalizeCSVToVCF(r io.Reader, w io.Writer, cfg NormalizeVCFConfig) (*Conve
 
 	if cfg.Deduplicate && len(contacts) > 0 {
 		cfg.logf("Deduplicating %d contacts...", len(contacts))
-		dc := dedupe.DefaultConfig()
-		dedupeResult := dedupe.Deduplicate(contacts, dc)
-
-		var final []model.Contact
-		mergeIdx := 0
-		for _, cluster := range dedupeResult.Clusters {
-			if len(cluster) <= 1 {
-				if len(cluster) == 1 {
-					final = append(final, cluster[0])
-				}
-				continue
-			}
-			if mergeIdx < len(dedupeResult.Merged) {
-				final = append(final, dedupeResult.Merged[mergeIdx].Contact)
-				mergeIdx++
-				continue
-			}
-			final = append(final, cluster[0])
-		}
-		contacts = final
+		contacts = dedupe.Representatives(dedupe.Deduplicate(contacts, dedupe.DefaultConfig()))
 		cfg.logf("After deduplication: %d contacts (removed %d duplicates)",
 			len(contacts), len(result.Contacts)-len(contacts))
 	}

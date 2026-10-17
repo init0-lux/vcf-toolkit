@@ -55,12 +55,13 @@ func init() {
 	dedupeCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "preview clusters without writing output")
 	addCSVFlags(dedupeCmd)
 
-	dedupeCmd.Flags().Float64VarP(&dFlags.emailWeight, "email-weight", "", 0.40, "email match weight (0.0–1.0)")
-	dedupeCmd.Flags().Float64VarP(&dFlags.phoneWeight, "phone-weight", "", 0.35, "phone match weight (0.0–1.0)")
-	dedupeCmd.Flags().Float64VarP(&dFlags.nameWeight, "name-weight", "", 0.20, "name fuzzy match weight (0.0–1.0)")
-	dedupeCmd.Flags().Float64VarP(&dFlags.orgWeight, "org-weight", "", 0.05, "organization match weight (0.0–1.0)")
-	dedupeCmd.Flags().Float64VarP(&dFlags.threshold, "threshold", "t", 0.50, "deduplication threshold (0.0–1.0)")
-	dedupeCmd.Flags().Float64VarP(&dFlags.minNameSim, "min-name-sim", "", 0.60, "minimum name similarity (0.0–1.0)")
+	defaults := dedupe.DefaultConfig()
+	dedupeCmd.Flags().Float64VarP(&dFlags.emailWeight, "email-weight", "", defaults.EmailExactWeight, "email match weight (0.0–1.0)")
+	dedupeCmd.Flags().Float64VarP(&dFlags.phoneWeight, "phone-weight", "", defaults.PhoneExactWeight, "phone match weight (0.0–1.0)")
+	dedupeCmd.Flags().Float64VarP(&dFlags.nameWeight, "name-weight", "", defaults.NameFuzzyWeight, "name fuzzy match weight (0.0–1.0)")
+	dedupeCmd.Flags().Float64VarP(&dFlags.orgWeight, "org-weight", "", defaults.OrganizationWeight, "organization match weight (0.0–1.0)")
+	dedupeCmd.Flags().Float64VarP(&dFlags.threshold, "threshold", "t", defaults.Threshold, "deduplication threshold (0.0–1.0)")
+	dedupeCmd.Flags().Float64VarP(&dFlags.minNameSim, "min-name-sim", "", defaults.MinNameSimilarity, "minimum name similarity (0.0–1.0)")
 }
 
 func runDedupe(cmd *cobra.Command, args []string) error {
@@ -191,52 +192,19 @@ func outputJSON(w io.Writer, result model.DedupeResult) error {
 
 func outputMergedCSV(w io.Writer, result model.DedupeResult) error {
 	writer := csv.NewWriter(w)
-	defer writer.Flush()
-
 	if err := writer.Write([]string{"name", "phone", "email", "org"}); err != nil {
 		return err
 	}
-
-	mergeIdx := 0
-	for _, cluster := range result.Clusters {
-		switch len(cluster) {
-		case 0:
-			continue
-		case 1:
-			if err := writer.Write([]string{
-				cluster[0].Name,
-				strings.Join(cluster[0].Phones, "; "),
-				strings.Join(cluster[0].Emails, "; "),
-				cluster[0].Organization,
-			}); err != nil {
-				return err
-			}
-		default:
-			if mergeIdx < len(result.Merged) {
-				mc := result.Merged[mergeIdx].Contact
-				mergeIdx++
-				if err := writer.Write([]string{
-					mc.Name,
-					strings.Join(mc.Phones, "; "),
-					strings.Join(mc.Emails, "; "),
-					mc.Organization,
-				}); err != nil {
-					return err
-				}
-				continue
-			}
-			// Fallback: keep the first contact in the cluster rather than drop it.
-			if err := writer.Write([]string{
-				cluster[0].Name,
-				strings.Join(cluster[0].Phones, "; "),
-				strings.Join(cluster[0].Emails, "; "),
-				cluster[0].Organization,
-			}); err != nil {
-				return err
-			}
+	for _, c := range dedupe.Representatives(result) {
+		if err := writer.Write([]string{
+			c.Name,
+			strings.Join(c.Phones, "; "),
+			strings.Join(c.Emails, "; "),
+			c.Organization,
+		}); err != nil {
+			return err
 		}
 	}
-
 	writer.Flush()
 	return writer.Error()
 }

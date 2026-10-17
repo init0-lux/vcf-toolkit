@@ -15,6 +15,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.EmailExactWeight != 0.40 {
 		t.Errorf("expected email weight 0.40, got %f", cfg.EmailExactWeight)
 	}
+	if cfg.MinNameSimilarity != 0.80 {
+		t.Errorf("expected min name similarity 0.80, got %f", cfg.MinNameSimilarity)
+	}
 }
 
 func TestDeduplicate_Empty(t *testing.T) {
@@ -357,5 +360,72 @@ func TestScorePair_MultiSignal(t *testing.T) {
 
 	if score <= 0.0 {
 		t.Errorf("expected positive score for multi-signal match, got %f", score)
+	}
+}
+
+func TestDeduplicate_DefaultConfigRealisticCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		a, b  model.Contact
+		merge bool
+	}{
+		{
+			"different people sharing an office phone",
+			model.Contact{Name: "Front Desk", Phones: []string{"+1-212-555-0100"}, Emails: []string{"frontdesk@acme.com"}, Organization: "Acme"},
+			model.Contact{Name: "John Doe", Phones: []string{"+1-212-555-0100"}, Emails: []string{"jdoe@acme.com"}, Organization: "Acme"},
+			false,
+		},
+		{
+			"shared team inbox",
+			model.Contact{Name: "Info Desk", Emails: []string{"info@acme.com"}, Organization: "Acme"},
+			model.Contact{Name: "Sales Team", Emails: []string{"info@acme.com"}, Organization: "Acme"},
+			false,
+		},
+		{
+			"name typo with same phone",
+			model.Contact{Name: "Jon Doe", Phones: []string{"+12125550100"}},
+			model.Contact{Name: "John Doe", Phones: []string{"+12125550100"}},
+			true,
+		},
+		{
+			"short name with same email",
+			model.Contact{Name: "Bob", Emails: []string{"bob@x.com"}},
+			model.Contact{Name: "Bob Johnson", Emails: []string{"bob@x.com"}},
+			true,
+		},
+		{
+			"initial with same email",
+			model.Contact{Name: "J. Smith", Emails: []string{"jane@globex.com"}, Organization: "Globex"},
+			model.Contact{Name: "Jane Smith", Emails: []string{"jane@globex.com"}, Organization: "Globex"},
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Deduplicate([]model.Contact{tt.a, tt.b}, DefaultConfig())
+			if merged := len(result.Clusters) == 1; merged != tt.merge {
+				t.Errorf("merged = %v, want %v (score %.3f)", merged, tt.merge, scorePair(tt.a, tt.b, DefaultConfig()))
+			}
+		})
+	}
+}
+
+func TestRepresentatives_KeepsSingletonsInOrder(t *testing.T) {
+	contacts := []model.Contact{
+		{Name: "Alice", Emails: []string{"alice@x.com"}},
+		{Name: "Bob Johnson", Emails: []string{"bob@x.com"}},
+		{Name: "Bob", Emails: []string{"bob@x.com"}, Phones: []string{"+12125550100"}},
+		{Name: "Carol", Emails: []string{"carol@x.com"}},
+	}
+	got := Representatives(Deduplicate(contacts, DefaultConfig()))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 contacts, got %d: %+v", len(got), got)
+	}
+	names := []string{got[0].Name, got[1].Name, got[2].Name}
+	if names[0] != "Alice" || names[1] != "Bob Johnson" || names[2] != "Carol" {
+		t.Errorf("unexpected order: %v", names)
+	}
+	if len(got[1].Phones) != 1 {
+		t.Errorf("merged contact should carry the phone, got %v", got[1].Phones)
 	}
 }
