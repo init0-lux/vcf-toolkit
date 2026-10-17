@@ -37,8 +37,3 @@ changelog:
       - "^test:"
       - "^chore:"
       - "^merge"
-
-release:
-  github:
-    owner: init0-lux
-    name: vcf_toolkit

@@ -13,8 +13,8 @@ The library is designed around deterministic, local processing by default. Exter
 
 - Normalize names, phone numbers, and email addresses
 - Detect and merge duplicate contacts
-- Convert CSV contacts to vCard 4.0 (`.vcf`)
-- Parse VCF back into CSV
+- Convert CSV contacts to vCard 4.0 (`.vcf`), including Google Contacts and Outlook exports
+- Parse VCF back into contacts (Go API)
 - Provide a terminal UI for interactive workflows
 
 ## Requirements
@@ -23,13 +23,25 @@ The library is designed around deterministic, local processing by default. Exter
 
 ## Install
 
-### CLI
+### npx (no install)
+
+```bash
+npx @init0-lux/vcf-toolkit --help
+```
+
+The npm package downloads the matching release binary for your platform on first run.
+
+### Go
 
 ```bash
 go install github.com/init0-lux/vcf-toolkit@latest
 ```
 
 This installs the `vcf-toolkit` binary if your `GOBIN` or `GOPATH/bin` is on `PATH`.
+
+### Prebuilt binaries
+
+Download an archive for Linux, macOS or Windows from the [releases page](https://github.com/init0-lux/vcf-toolkit/releases).
 
 ### From source
 
@@ -45,6 +57,7 @@ Show help:
 
 ```bash
 vcf-toolkit --help
+vcf-toolkit --version
 vcf-toolkit convert --help
 vcf-toolkit dedupe --help
 vcf-toolkit normalize --help
@@ -58,7 +71,10 @@ vcf-toolkit convert contacts.csv > contacts.vcf
 cat contacts.csv | vcf-toolkit convert > contacts.vcf
 vcf-toolkit convert contacts.csv --out contacts.vcf
 vcf-toolkit convert contacts.csv --dedupe --out contacts.vcf
+vcf-toolkit convert registrations.csv --country +91 --out contacts.vcf
 ```
+
+Pass `--country` with the calling code your numbers belong to when they are written without one (for example `98765 43210` or `(212) 555-0101`). See [Phone numbers](#phone-numbers).
 
 ### Deduplicate CSV contacts
 
@@ -73,13 +89,19 @@ vcf-toolkit dedupe contacts.csv --dry-run
 ```bash
 vcf-toolkit normalize contacts.csv > normalized.csv
 vcf-toolkit normalize contacts.csv --json > normalized.json
+vcf-toolkit normalize contacts.csv --country +1 --strip-aliases
 ```
+
+`--strip-aliases` turns `user+tag@example.com` into `user@example.com`. It is off by default because the alias is part of the address the contact gave you.
 
 ### Interactive TUI
 
 ```bash
 vcf-toolkit tui
+VCF_TOOLKIT_COUNTRY=+91 vcf-toolkit tui
 ```
+
+Set `VCF_TOOLKIT_COUNTRY` to give the TUI a default calling code.
 
 ## Go SDK usage
 
@@ -202,23 +224,33 @@ func main() {
 
 ## CSV input expectations
 
-The converter and dedupe commands expect a header row. Common header variants are auto-detected.
+Every command expects a header row. Headers are matched by their words, so exports from Google Contacts (both the current and legacy formats), Outlook and most sign-up forms work without configuration.
 
-Recognized fields include:
+Recognized columns include:
 
-- name: `name`, `full name`, `first name`, `last name`, `displayname`
-- phone: `phone`, `mobile`, `cell`, `telephone`
-- email: `email`, `e-mail`, `email address`
-- organization: `org`, `organization`, `company`
+- name: `Name`, `Full Name`, `Display Name`, `Your Name`, or separate `First Name` / `Middle Name` / `Last Name` (also `Given Name`, `Additional Name`, `Family Name`, `Surname`)
+- phone: `Phone`, `Mobile`, `Mobile Phone`, `Business Phone`, `Phone 1 - Value`, `Contact Number`, `WhatsApp Number`
+- email: `Email`, `E-mail Address`, `E-mail 2 Address`, `E-mail 1 - Value`, `Primary Email`
+- organization: `Org`, `Company`, `Organization Name`, `Organization 1 - Name`, `College`
 
-If your source uses custom headers, set a manual header mapping in the Go API:
+Label, type, title, fax, pager, nickname and phonetic columns are skipped, as are numbers that belong to someone else (assistant, manager, emergency contact, parent). Every phone and email column is kept, and Google's `value ::: value` cells are split.
+
+If no column is recognized the command exits with an error instead of producing empty output. Use `--verbose` to see how each column was mapped and which were ignored.
+
+Map custom headers with `--map` (repeatable). Fields are `name`, `given_name`, `middle_name`, `family_name`, `phone`, `email`, `org` and `ignore`:
+
+```bash
+vcf-toolkit convert export.csv --map "Primary Contact=phone" --map "Team Name=ignore"
+```
+
+The same mapping is available in the Go API:
 
 ```go
 cfg := convert.Config{
 	HeaderMapping: map[string]string{
-		"Full Name": "name",
-		"Primary Phone": "phone",
-		"Work Email": "email",
+		"Full Name":     convert.FieldName,
+		"Primary Phone": convert.FieldPhone,
+		"Work Email":    convert.FieldEmail,
 	},
 }
 ```
@@ -230,6 +262,9 @@ cfg := convert.Config{
 - Writes vCard 4.0 records
 - Supports names, phones, emails, and organization fields
 - Preserves multiple phone and email values per contact
+- Builds the structured `N` field from separate name columns when present, and understands `Family, Given` and `Given Family, Jr.`
+- Writes phone numbers with a known country as `tel:` URIs in E.164 form and all others as typed
+- Writes email addresses exactly as given
 
 ### CSV
 
@@ -257,16 +292,23 @@ The dedupe engine uses a weighted score across:
 
 - exact email match, including alias normalization
 - exact phone match after digit cleanup
-- fuzzy name similarity using Jaro-Winkler
+- fuzzy name similarity using Jaro-Winkler (counted only at 0.80 or above, so a shared office phone or team inbox does not merge different people)
 - organization match
 
-Default settings are tuned for practical CSV cleanup, not strict identity resolution. For high-volume or high-risk data, validate results on a sample before using the output downstream.
+Default settings are tuned for practical CSV cleanup, not strict identity resolution. Preview merges with `--dry-run` and tune them with `--threshold`, `--min-name-sim` and the weight flags. For high-volume or high-risk data, validate results on a sample before using the output downstream.
 
-## Phone normalization caveat
+## Phone numbers
 
-Phone handling is heuristic. It removes formatting characters, handles a subset of country codes, and produces a normalized comparable form. It is not a full international numbering library.
+A phone number becomes international (E.164) when its country is known:
 
-If you need strict telecom-grade validation, wrap this package with a dedicated phone-number library in your application.
+- it starts with `+` or `00`, or
+- you pass `--country` (Go: `Config.DefaultCountry`), e.g. `--country +91`
+
+With `--country +91`, `98765 43210`, `098765 43210` and `919876543210` all become `+919876543210`. A leading `0` is treated as a national trunk prefix. For `+1` and `+91` numbers must have exactly 10 national digits; anything else is kept as typed.
+
+Without a known country, a number is never given one. It is written as typed (`TEL;VALUE=text:...`) and the CLI prints a warning suggesting `--country`.
+
+Phone handling is heuristic and is not a full international numbering library. If you need strict telecom-grade validation, wrap this package with a dedicated phone-number library in your application.
 
 ## LLM-based name normalization
 
@@ -290,13 +332,13 @@ If `UseLLM` is false, normalization stays local and deterministic.
 Run tests:
 
 ```bash
-GOCACHE=/tmp/vcf-toolkit-gocache go test ./...
+make test
 ```
 
-Build the CLI:
+Build the CLI into `bin/vcf-toolkit` (version taken from `git describe`):
 
 ```bash
-go build -o bin/vcf-toolkit .
+make build
 ```
 
 ## License

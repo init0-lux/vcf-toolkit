@@ -31,7 +31,8 @@ Documentation: https://github.com/init0-lux/vcf-toolkit`,
 	SilenceErrors: true,
 }
 
-func Execute() {
+func Execute(version string) {
+	rootCmd.Version = version
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
