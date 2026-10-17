@@ -54,7 +54,9 @@ var nationalLengths = map[string]int{"+1": 10, "+91": 10}
 func normalizePhone(raw string, cfg PhoneConfig) (normalized, country string, valid bool) {
 	digits := allDigits(raw)
 
-	international := strings.HasPrefix(raw, "+")
+	// "+" counts wherever it precedes the first digit: "(+44) 20...", "Tel: +44 20...".
+	first := strings.IndexAny(raw, "+0123456789")
+	international := first >= 0 && raw[first] == '+'
 	if !international && strings.HasPrefix(digits, "00") {
 		international = true
 		digits = digits[2:]
@@ -80,7 +82,8 @@ func normalizePhone(raw string, cfg PhoneConfig) (normalized, country string, va
 	if cfg.StrictValidation || len(national) < 7 || len(national) > 15 {
 		return "", "", false
 	}
-	return national, "", true
+	// Keep the trunk prefix: without a country it is part of the local number.
+	return digits, "", true
 }
 
 // nationalNumber validates a number written without a country code against cc,

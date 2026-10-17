@@ -299,6 +299,10 @@ func TestNormalizePhone_CountryHandling(t *testing.T) {
 		{"00 international prefix", "0044 20 7946 0958", "+91", true, "+442079460958", true, "+44"},
 		{"00 international prefix, no country", "0044 20 7946 0958", "", false, "+442079460958", true, "+44"},
 		{"unknown default country is ignored", "(212) 555-0101", "+999", false, "2125550101", true, ""},
+		// The trunk 0 is part of a local number; keep it when no country applies.
+		{"UK local, no country, keeps trunk 0", "020 7946 0958", "", false, "02079460958", true, ""},
+		{"parenthesized plus is international", "(+44) 20 7946 0958", "+33", true, "+442079460958", true, "+44"},
+		{"plus after label is international", "Tel: +44 20 7946 0958", "+33", true, "+442079460958", true, "+44"},
 	}
 
 	for _, tc := range tests {

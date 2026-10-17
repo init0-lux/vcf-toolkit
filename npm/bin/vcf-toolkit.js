@@ -75,14 +75,14 @@ function download(urlToGet, dest, redirects = 0) {
   });
 }
 
-async function extract(archivePath) {
+async function extract(archivePath, destDir) {
   if (isWindows) {
     const zip = new AdmZip(archivePath);
-    zip.extractAllTo(binDir, true);
+    zip.extractAllTo(destDir, true);
     return;
   }
 
-  await tar.x({ file: archivePath, cwd: binDir });
+  await tar.x({ file: archivePath, cwd: destDir });
 }
 
 async function ensureBinary() {
@@ -92,17 +92,22 @@ async function ensureBinary() {
 
   ensureDir(binDir);
 
+  // Download and extract outside binDir, then rename the binary into place so
+  // an interrupted first run never leaves a truncated binary behind.
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vcf-toolkit-'));
-  const tmpPath = path.join(tmpDir, filename);
   try {
-    await download(url, tmpPath);
-    await extract(tmpPath);
+    const archivePath = path.join(tmpDir, filename);
+    await download(url, archivePath);
+    await extract(archivePath, tmpDir);
+
+    const staged = `${binPath}.${process.pid}.tmp`;
+    fs.copyFileSync(path.join(tmpDir, binName), staged);
+    if (!isWindows) {
+      fs.chmodSync(staged, 0o755);
+    }
+    fs.renameSync(staged, binPath);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-
-  if (!isWindows) {
-    fs.chmodSync(binPath, 0o755);
   }
 }
 

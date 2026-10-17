@@ -82,8 +82,7 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 
 	mapping := buildHeaderMapping(headers, cfg.HeaderMapping)
 	if len(mapping) == 0 {
-		return nil, fmt.Errorf("%w (%s); map columns explicitly, e.g. --map \"%s=name\"",
-			ErrNoRecognizedColumns, strings.Join(headers, ", "), headers[0])
+		return nil, fmt.Errorf("%w (%s)", ErrNoRecognizedColumns, strings.Join(headers, ", "))
 	}
 
 	if cfg.Verbose {
@@ -110,6 +109,12 @@ func ParseCSV(r io.Reader, cfg Config) (*ParseResult, error) {
 			break
 		}
 		if err != nil {
+			// Only malformed CSV is recoverable; an I/O error repeats on every
+			// Read and would loop forever.
+			var perr *csv.ParseError
+			if !errors.As(err, &perr) {
+				return nil, fmt.Errorf("reading CSV: %w", err)
+			}
 			result.Errors = append(result.Errors, model.ParseError{
 				Row:     line,
 				Message: fmt.Sprintf("read error: %v", err),
@@ -174,6 +179,11 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 			setOnce(&c.FamilyName, val)
 		case FieldPhone:
 			for _, p := range splitMultiValue(val) {
+				// Word-matched columns such as "Phone verified" hold answers, not numbers.
+				if len(normalize.PhoneDigits(p)) < 3 {
+					errs = append(errs, rejectedValue(header, p, "a phone number"))
+					continue
+				}
 				key := normalize.PhoneDigits(p)
 				if key == "" {
 					key = p
@@ -185,6 +195,10 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 			}
 		case FieldEmail:
 			for _, e := range splitMultiValue(val) {
+				if !strings.Contains(e, "@") {
+					errs = append(errs, rejectedValue(header, e, "an email address"))
+					continue
+				}
 				if key := strings.ToLower(e); !seenEmails[key] {
 					seenEmails[key] = true
 					c.Emails = append(c.Emails, e)
@@ -207,6 +221,13 @@ func contactFromRow(row []string, headers []string, mapping map[string]string) (
 	}
 
 	return c, errs
+}
+
+func rejectedValue(header, val, kind string) model.ParseError {
+	return model.ParseError{
+		Field:   header,
+		Message: fmt.Sprintf("%q is not %s (column %q), ignored", val, kind, header),
+	}
 }
 
 // splitMultiValue splits Google Contacts cells that hold several values
@@ -274,7 +295,8 @@ var skipHeaderWords = wordSet(
 var (
 	emailWords      = wordSet("email", "emails")
 	phoneWords      = wordSet("phone", "phones", "telephone", "tel", "mobile", "cell", "cellphone", "whatsapp")
-	phoneJoined     = wordSet("phonenumber", "phoneno", "mobilenumber", "mobileno", "contactnumber", "contactno", "cellnumber")
+	emailJoined     = wordSet("mail", "mailid", "mailaddress")
+	phoneJoined     = wordSet("phonenumber", "phoneno", "phno", "mobilenumber", "mobileno", "mobno", "contactnumber", "contactno", "cellnumber", "cellno", "telno")
 	orgWords        = wordSet("org", "organization", "organisation", "company", "employer", "affiliation", "college", "university", "institution")
 	givenWords      = wordSet("first", "given")
 	middleWords     = wordSet("middle", "additional")
@@ -332,7 +354,7 @@ func detectField(header string) string {
 	switch {
 	case has(skipHeaderWords):
 		return ""
-	case (has(emailWords) || strings.HasPrefix(joined, "email") || joined == "mail") && !hasName:
+	case (has(emailWords) || strings.HasPrefix(joined, "email") || emailJoined[joined]) && !hasName:
 		return FieldEmail
 	case has(phoneWords) || phoneJoined[joined]:
 		return FieldPhone
@@ -363,13 +385,24 @@ func ContactToVCF(c model.Contact) string {
 }
 
 func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
+	vcf, _ := renderVCard(c, opts)
+	return vcf
+}
+
+// renderVCard returns the vCard and how many phone numbers had no known
+// country and were written as typed.
+func renderVCard(c model.Contact, opts VCFOptions) (string, int) {
 	var b strings.Builder
+	localPhones := 0
 
 	b.WriteString("BEGIN:VCARD\r\n")
 	b.WriteString("VERSION:4.0\r\n")
 	b.WriteString("PRODID:-//vcf-toolkit//EN\r\n")
 
 	fn := c.Name
+	if fn == "" {
+		fn = joinNonEmpty(c.GivenName, c.MiddleName, c.FamilyName)
+	}
 	if fn == "" {
 		fn = "Unknown"
 	}
@@ -384,6 +417,7 @@ func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
 		if tel, ok := internationalPhone(phone, opts.DefaultCountry); ok {
 			b.WriteString(fmt.Sprintf("TEL;VALUE=uri:tel:%s\r\n", tel))
 		} else {
+			localPhones++
 			b.WriteString(fmt.Sprintf("TEL;VALUE=text:%s\r\n", escapeVCF(strings.TrimSpace(phone))))
 		}
 	}
@@ -396,7 +430,7 @@ func ContactToVCFWithOptions(c model.Contact, opts VCFOptions) string {
 	}
 
 	b.WriteString("END:VCARD\r\n")
-	return b.String()
+	return b.String(), localPhones
 }
 
 // internationalPhone returns the E.164 form of phone when its country is known.
@@ -409,16 +443,32 @@ func internationalPhone(phone, defaultCountry string) (string, bool) {
 // no known country and were written as typed.
 func writeVCards(w io.Writer, contacts []model.Contact, opts VCFOptions) (localPhones int, err error) {
 	for _, c := range contacts {
-		for _, p := range c.Phones {
-			if _, ok := internationalPhone(p, opts.DefaultCountry); !ok {
-				localPhones++
-			}
-		}
-		if _, err := io.WriteString(w, ContactToVCFWithOptions(c, opts)); err != nil {
+		vcf, n := renderVCard(c, opts)
+		localPhones += n
+		if _, err := io.WriteString(w, vcf); err != nil {
 			return localPhones, fmt.Errorf("writing VCF: %w", err)
 		}
 	}
 	return localPhones, nil
+}
+
+// withInternationalPhones returns copies of contacts with every phone whose
+// country is known rewritten to E.164, so dedupe sees "+91 98765 43210" and
+// "98765 43210" as the same number.
+func withInternationalPhones(contacts []model.Contact, defaultCountry string) []model.Contact {
+	out := make([]model.Contact, len(contacts))
+	for i, c := range contacts {
+		phones := make([]string, len(c.Phones))
+		for j, p := range c.Phones {
+			if tel, ok := internationalPhone(p, defaultCountry); ok {
+				p = tel
+			}
+			phones[j] = p
+		}
+		c.Phones = phones
+		out[i] = c
+	}
+	return out
 }
 
 func validateCountry(country string) error {
@@ -503,6 +553,9 @@ func ConvertCSVToVCF(r io.Reader, w io.Writer, cfg Config) (*ConversionSummary, 
 	contacts := result.Contacts
 	if cfg.Deduplicate && len(contacts) > 0 {
 		cfg.logf("Deduplicating %d contacts...", len(contacts))
+		if cfg.DefaultCountry != "" {
+			contacts = withInternationalPhones(contacts, cfg.DefaultCountry)
+		}
 		contacts = dedupe.Representatives(dedupe.Deduplicate(contacts, dedupe.DefaultConfig()))
 
 		cfg.logf("After deduplication: %d contacts (removed %d duplicates)",

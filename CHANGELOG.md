@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Email addresses were rewritten in VCF output (plus-aliases removed, lowercased). They are now written as given.
 - Dedupe merged different people who shared a phone or inbox. The minimum name similarity is now 0.80.
 - The TUI's normalize-and-dedupe workflows dropped every contact that had no duplicate.
+- Reading CSV from an input that fails mid-stream (e.g. a broken pipe) looped forever; it now stops with an error.
 
 ### Added
 

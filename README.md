@@ -233,7 +233,7 @@ Recognized columns include:
 - email: `Email`, `E-mail Address`, `E-mail 2 Address`, `E-mail 1 - Value`, `Primary Email`
 - organization: `Org`, `Company`, `Organization Name`, `Organization 1 - Name`, `College`
 
-Label, type, title, fax, pager, nickname and phonetic columns are skipped, as are numbers that belong to someone else (assistant, manager, emergency contact, parent). Every phone and email column is kept, and Google's `value ::: value` cells are split.
+Label, type, title, fax, pager, nickname and phonetic columns are skipped, as are numbers that belong to someone else (assistant, manager, emergency contact, parent). Every phone and email column is kept, and Google's `value ::: value` cells are split. Values that can't be an email (no `@`) or a phone number (fewer than 3 digits), such as the answers in a "Subscribe to email updates?" column, are skipped and listed with `--verbose`.
 
 If no column is recognized the command exits with an error instead of producing empty output. Use `--verbose` to see how each column was mapped and which were ignored.
 

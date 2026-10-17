@@ -776,3 +776,19 @@ func TestConvertCSVToVCF_InvalidDefaultCountry(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"IN"`)
 }
+
+func TestContactToVCF_FNFromNameParts(t *testing.T) {
+	vcf := ContactToVCF(model.Contact{GivenName: "Ada", FamilyName: "Lovelace"})
+	assert.Contains(t, vcf, "FN:Ada Lovelace\r\n")
+	assert.Contains(t, vcf, "N:Lovelace;Ada;;;")
+}
+
+func TestConvertCSVToVCF_DedupeUsesDefaultCountry(t *testing.T) {
+	// The same number with and without its country code is one phone.
+	input := "name,phone\nPriya Sharma,+91 98765 43210\nPriya Sharma,98765 43210\n"
+	var buf bytes.Buffer
+	result, err := ConvertCSVToVCF(strings.NewReader(input), &buf, Config{DefaultCountry: "+91", Deduplicate: true})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.OutputVCards)
+	assert.Equal(t, 1, strings.Count(buf.String(), "TEL;"))
+}

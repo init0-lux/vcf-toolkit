@@ -572,6 +572,11 @@ type normalizedContact struct {
 	Phones []string `json:"phones"`
 	Emails []string `json:"emails"`
 	Org    string   `json:"org"`
+
+	// Name parts from separate columns, kept for the vCard N field.
+	GivenName  string `json:"-"`
+	MiddleName string `json:"-"`
+	FamilyName string `json:"-"`
 }
 
 func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM, country string) ([]normalizedContact, error) {
@@ -591,10 +596,13 @@ func parseAndNormalizeRows(r io.Reader, llm normalize.NameLLM, country string) (
 	for _, c := range result.Contacts {
 		n := convert.NormalizeContact(c, cfg)
 		contacts = append(contacts, normalizedContact{
-			Name:   n.Name,
-			Phones: n.Phones,
-			Emails: n.Emails,
-			Org:    n.Organization,
+			Name:       n.Name,
+			GivenName:  n.GivenName,
+			MiddleName: n.MiddleName,
+			FamilyName: n.FamilyName,
+			Phones:     n.Phones,
+			Emails:     n.Emails,
+			Org:        n.Organization,
 		})
 	}
 	return contacts, nil
@@ -605,6 +613,9 @@ func toModelContacts(in []normalizedContact) []model.Contact {
 	for _, c := range in {
 		out = append(out, model.Contact{
 			Name:         c.Name,
+			GivenName:    c.GivenName,
+			MiddleName:   c.MiddleName,
+			FamilyName:   c.FamilyName,
 			Phones:       append([]string(nil), c.Phones...),
 			Emails:       append([]string(nil), c.Emails...),
 			Organization: c.Org,
@@ -618,10 +629,13 @@ func fromMergedContacts(result model.DedupeResult) []normalizedContact {
 	out := make([]normalizedContact, 0, len(reps))
 	for _, c := range reps {
 		out = append(out, normalizedContact{
-			Name:   c.Name,
-			Phones: append([]string(nil), c.Phones...),
-			Emails: append([]string(nil), c.Emails...),
-			Org:    c.Organization,
+			Name:       c.Name,
+			GivenName:  c.GivenName,
+			MiddleName: c.MiddleName,
+			FamilyName: c.FamilyName,
+			Phones:     append([]string(nil), c.Phones...),
+			Emails:     append([]string(nil), c.Emails...),
+			Org:        c.Organization,
 		})
 	}
 	return out

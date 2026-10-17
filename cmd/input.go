@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -57,7 +58,7 @@ func parseCSVInput(cmd *cobra.Command, r io.Reader) (*convert.ParseResult, error
 		Stderr:        cmd.ErrOrStderr(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, withMapHint(err)
 	}
 	if verbose {
 		for _, pe := range result.Errors {
@@ -65,6 +66,14 @@ func parseCSVInput(cmd *cobra.Command, r io.Reader) (*convert.ParseResult, error
 		}
 	}
 	return result, nil
+}
+
+// withMapHint points CLI users at --map when no CSV column was recognized.
+func withMapHint(err error) error {
+	if errors.Is(err, convert.ErrNoRecognizedColumns) {
+		return fmt.Errorf("%w; map columns with --map \"Column=field\"", err)
+	}
+	return err
 }
 
 // openInput resolves the input source from CLI args or defaults to stdin.

@@ -64,7 +64,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		Stderr:         cmd.ErrOrStderr(),
 	})
 	if err != nil {
-		return err
+		return withMapHint(err)
 	}
 
 	if verbose {

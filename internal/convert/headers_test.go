@@ -1,6 +1,8 @@
 package convert
 
 import (
+	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -137,4 +139,46 @@ func TestParseCSV_VerboseListsIgnoredColumns(t *testing.T) {
 	_, err := ParseCSV(strings.NewReader(input), Config{Verbose: true, Stderr: &stderr})
 	require.NoError(t, err)
 	assert.Contains(t, stderr.String(), `Ignored columns: "notes"`)
+}
+
+func TestParseCSV_RejectsNonContactValues(t *testing.T) {
+	// Word matching maps survey columns to email/phone; their answers are not
+	// contact values and must not leak into the vCard.
+	input := "name,email,Subscribe to email updates?,phone,Phone verified\n" +
+		"Al,al@x.com,Yes,+12125550100,TRUE\n"
+	result, err := ParseCSV(strings.NewReader(input), Config{})
+	require.NoError(t, err)
+	require.Len(t, result.Contacts, 1)
+	assert.Equal(t, []string{"al@x.com"}, result.Contacts[0].Emails)
+	assert.Equal(t, []string{"+12125550100"}, result.Contacts[0].Phones)
+	require.Len(t, result.Errors, 2)
+	assert.Contains(t, result.Errors[0].Message, `"Yes" is not an email address`)
+	assert.Contains(t, result.Errors[1].Message, `"TRUE" is not a phone number`)
+}
+
+func TestParseCSV_IndianFormHeaders(t *testing.T) {
+	input := "Name,Mail ID,Mob. No.,Ph. No.\nPriya,priya@gmail.com,98765 43210,044 2345 6789\n"
+	result, err := ParseCSV(strings.NewReader(input), Config{})
+	require.NoError(t, err)
+	require.Len(t, result.Contacts, 1)
+	assert.Equal(t, []string{"priya@gmail.com"}, result.Contacts[0].Emails)
+	assert.Equal(t, []string{"98765 43210", "044 2345 6789"}, result.Contacts[0].Phones)
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("disk on fire") }
+
+func TestParseCSV_ReaderErrorIsReturned(t *testing.T) {
+	// A persistent I/O error must end parsing instead of being retried forever.
+	r := io.MultiReader(strings.NewReader("name,phone\nAl,+12125550100\n"), failingReader{})
+	_, err := ParseCSV(r, Config{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disk on fire")
+}
+
+func TestParseCSV_NoColumnsErrorIsCLIAgnostic(t *testing.T) {
+	_, err := ParseCSV(strings.NewReader("a,b\n1,2\n"), Config{})
+	require.ErrorIs(t, err, ErrNoRecognizedColumns)
+	assert.NotContains(t, err.Error(), "--map")
 }
